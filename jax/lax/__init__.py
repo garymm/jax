@@ -20,8 +20,7 @@ from jax._src.lax.lax import (
   Precision as Precision,
   PrecisionLike as PrecisionLike,
   DotAlgorithm as DotAlgorithm,
-  DotAlgorithmLike as DotAlgorithmLike,
-  DotTransposeAlgorithmLike as DotTransposeAlgorithmLike,
+  DotAlgorithmPreset as DotAlgorithmPreset,
   RandomAlgorithm as RandomAlgorithm,
   RoundingMethod as RoundingMethod,
   abs as abs,
@@ -341,6 +340,7 @@ from jax._src.lax.control_flow import (
 from jax._src.lax.fft import (
   fft as fft,
   fft_p as fft_p,
+  FftType as FftType,
 )
 from jax._src.lax.parallel import (
   all_gather as all_gather,

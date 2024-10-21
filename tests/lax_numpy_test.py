@@ -3775,6 +3775,14 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         np.array(bytearray(b'\x2a\xf3'), ndmin=2)
     )
 
+  @jtu.sample_product(value=[False, 1, 1.0, np.int32(5), np.array(16)])
+  def testIsScalar(self, value):
+    self.assertTrue(jnp.isscalar(value))
+
+  @jtu.sample_product(value=[None, [1], slice(4), (), np.array([0])])
+  def testIsNotScalar(self, value):
+    self.assertFalse(jnp.isscalar(value))
+
   @jtu.sample_product(val=[1+1j, [1+1j], jnp.pi, np.arange(2)])
   def testIsComplexObj(self, val):
     args_maker = lambda: [val]
@@ -6341,8 +6349,9 @@ class NumpyDocTests(jtu.JaxTestCase):
 
     unimplemented = ['fromfile', 'fromiter']
     aliases = ['abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'atan2',
-               'amax', 'amin', 'around', 'bitwise_right_shift', 'conj', 'degrees',
-               'divide', 'mod', 'pow', 'radians', 'round_']
+               'amax', 'amin', 'around', 'bitwise_invert', 'bitwise_left_shift',
+               'bitwise_not','bitwise_right_shift', 'conj', 'degrees', 'divide',
+               'mod', 'pow', 'radians', 'round_']
     skip_args_check = ['vsplit', 'hsplit', 'dsplit', 'array_split']
 
     for name in dir(jnp):

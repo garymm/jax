@@ -334,7 +334,9 @@ def convert(fun_jax: Callable,
   """
   if not enable_xla:
     if allow_enable_xla_false():
-      warnings.warn("jax2tf.convert with enable_xla=False is deprecated.")
+      warnings.warn("jax2tf.convert with enable_xla=False is deprecated.",
+                    DeprecationWarning,
+                    stacklevel=2)
     else:
       raise ValueError("jax2tf.convert with enable_xla=False is not supported.")
 
@@ -346,7 +348,9 @@ def convert(fun_jax: Callable,
 
   if not native_serialization:
     warnings.warn(
-        "jax2tf.convert with native_serialization=False is deprecated.")
+        "jax2tf.convert with native_serialization=False is deprecated.",
+        DeprecationWarning,
+        stacklevel=2)
   if native_serialization and not enable_xla:
     raise ValueError(
         "native_serialization is not supported with enable_xla=False")
@@ -1754,7 +1758,7 @@ tf_impl[lax.sub_p] = tf.math.subtract
 tf_impl[lax.mul_p] = tf.math.multiply
 
 
-def _iota(*, dtype, shape, dimension):
+def _iota(*, dtype, shape, dimension, sharding=None):
   dtype = _to_tf_dtype(dtype)
   # Some dtypes are unsupported, like uint32, so we just fall back to int32.
   # TODO(mattjj, necula): improve tf.range dtype handling
@@ -2177,14 +2181,11 @@ tf_impl_with_avals[lax.conv_general_dilated_p] = _conv_general_dilated
 
 
 def _dot_general(lhs, rhs, *, dimension_numbers,
-                 precision: tuple[PrecisionType, PrecisionType] | None,
+                 precision: lax_internal.CanonicalPrecision,
                  preferred_element_type: DType | None,
-                 algorithm: Any, transpose_algorithm: Any,
                  _in_avals: Sequence[core.ShapedArray],
                  _out_aval: core.ShapedArray):
   """Implementation of lax.dot_general_p in terms of tf.linalg.einsum."""
-  del algorithm, transpose_algorithm  # unused
-
   # TODO(b/293247337): we ought to turn on this safety check, but this leads to
   # failures. Since we are going to turn on native serializaton soon, wait
   # until then to turn on this check.
@@ -2198,6 +2199,14 @@ def _dot_general(lhs, rhs, *, dimension_numbers,
   #   raise NotImplementedError(
   #     "dot_general with different lhs_dtype and rhs_dtype is not supported "
   #     "in non-native serialization")
+
+  if precision == lax.DotAlgorithmPreset.DEFAULT:
+    precision = None
+  if precision is not None and not (isinstance(precision, tuple) and
+                                    len(precision) == 2):
+    raise NotImplementedError(
+        f"Unsupported precision in dot_general: {precision}")
+
   lhs, rhs, convert_result = _dot_general_convert_to_common_dtype(
     lhs, _in_avals[0], rhs, _in_avals[1], _out_aval)
 
@@ -2207,7 +2216,7 @@ def _dot_general(lhs, rhs, *, dimension_numbers,
   dnums_proto.rhs_contracting_dimensions.extend(rhs_contracting)
   dnums_proto.lhs_batch_dimensions.extend(lhs_batch)
   dnums_proto.rhs_batch_dimensions.extend(rhs_batch)
-  precision_config_proto = _precision_config_proto(precision)
+  precision_config_proto = _precision_config_proto(precision)  # type: ignore
   res = tfxla.dot_general(
       lhs,
       rhs,
@@ -2876,6 +2885,9 @@ def _gather_dimensions_proto(indices_shape, dimension_numbers):
   proto.offset_dims.extend(dimension_numbers.offset_dims)
   proto.collapsed_slice_dims.extend(dimension_numbers.collapsed_slice_dims)
   proto.start_index_map.extend(dimension_numbers.start_index_map)
+  proto.operand_batching_dims.extend(dimension_numbers.operand_batching_dims)
+  proto.start_indices_batching_dims.extend(
+      dimension_numbers.start_indices_batching_dims)
   assert indices_shape
   proto.index_vector_dim = len(indices_shape) - 1
   return proto
@@ -2987,6 +2999,9 @@ def _scatter_dimensions_proto(indices_shape, dimension_numbers):
   proto.inserted_window_dims.extend(dimension_numbers.inserted_window_dims)
   proto.scatter_dims_to_operand_dims.extend(
       dimension_numbers.scatter_dims_to_operand_dims)
+  proto.input_batching_dims.extend(dimension_numbers.operand_batching_dims)
+  proto.scatter_indices_batching_dims.extend(
+      dimension_numbers.scatter_indices_batching_dims)
   assert indices_shape
   proto.index_vector_dim = len(indices_shape) - 1
   return proto
@@ -3264,7 +3279,7 @@ tf_impl[lax.sort_p] = _sort
 def _fft(x, *, fft_type, fft_lengths,
          _in_avals: Sequence[core.ShapedArray],
          _out_aval: core.ShapedArray):
-  FFT, IFFT, RFFT, IRFFT = list(map(xla_client.FftType, [0, 1, 2, 3]))
+  FFT, IFFT, RFFT, IRFFT = list(map(lax.FftType, [0, 1, 2, 3]))
   tf_funcs = {
       FFT: [tf.signal.fft, tf.signal.fft2d, tf.signal.fft3d],
       IFFT: [tf.signal.ifft, tf.signal.ifft2d, tf.signal.ifft3d],
@@ -3299,12 +3314,16 @@ def _svd(
     full_matrices: bool,
     compute_uv: bool,
     subset_by_index: tuple[int, int] | None = None,
+    algorithm: lax.linalg.SvdAlgorithm | None = None,
 ):
   if not (
       subset_by_index is None
       or subset_by_index == (0, min(operand.shape[-1], operand.shape[-2]))
   ):
     raise NotImplementedError("subset_by_index is not implemented")
+
+  if algorithm is not None and algorithm != lax.linalg.SvdAlgorithm.DEFAULT:
+    raise NotImplementedError("SVD algorithm is not implemented")
 
   result = tf.linalg.svd(operand, full_matrices, compute_uv)
   if not compute_uv:

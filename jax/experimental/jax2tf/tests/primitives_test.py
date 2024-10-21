@@ -67,7 +67,6 @@ from jax._src import config
 from jax._src import test_util as jtu
 from jax.experimental import jax2tf
 from jax.interpreters import mlir
-from jax._src.interpreters import xla
 
 import numpy as np
 import tensorflow as tf
@@ -158,11 +157,7 @@ class JaxPrimitiveTest(tf_test_util.JaxToTfTestCase):
     """Fail if there are JAX primitives that are not implemented."""
     # Harvest primitives from XLA translation tables
     all_primitives = (
-        set(xla._translations)
-        | set(xla._backend_specific_translations["cpu"])
-        | set(xla._backend_specific_translations["gpu"])
-        | set(xla._backend_specific_translations["tpu"])
-        | set(mlir._lowerings)
+        set(mlir._lowerings)
         | set(mlir._platform_specific_lowerings["cpu"])
         | set(mlir._platform_specific_lowerings["gpu"])
         | set(mlir._platform_specific_lowerings["tpu"]))

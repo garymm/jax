@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import enum
 import functools
 from functools import partial
 import math
@@ -47,7 +48,6 @@ from jax._src.lax.lax import (
 from jax._src.lib import gpu_solver
 from jax._src.lib import gpu_sparse
 from jax._src.lib import lapack
-from jax._src.lib import version as jaxlib_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import chlo
 from jax._src.lib.mlir.dialects import hlo
@@ -309,6 +309,13 @@ def qr(x: ArrayLike, *, full_matrices: bool = True) -> tuple[Array, Array]:
   return q, r
 
 
+class SvdAlgorithm(enum.Enum):
+  """Enum for SVD algorithm."""
+  DEFAULT = "default"
+  QR = "QR"
+  JACOBI = "Jacobi"
+
+
 @overload
 def svd(
     x: ArrayLike,
@@ -316,6 +323,7 @@ def svd(
     full_matrices: bool = True,
     compute_uv: Literal[True],
     subset_by_index: tuple[int, int] | None = None,
+    algorithm: SvdAlgorithm | None = None,
 ) -> tuple[Array, Array, Array]:
   ...
 
@@ -327,6 +335,7 @@ def svd(
     full_matrices: bool = True,
     compute_uv: Literal[False],
     subset_by_index: tuple[int, int] | None = None,
+    algorithm: SvdAlgorithm | None = None,
 ) -> Array:
   ...
 
@@ -338,6 +347,7 @@ def svd(
     full_matrices: bool = True,
     compute_uv: bool = True,
     subset_by_index: tuple[int, int] | None = None,
+    algorithm: SvdAlgorithm | None = None,
 ) -> Array | tuple[Array, Array, Array]:
   ...
 
@@ -349,6 +359,7 @@ def svd(
     full_matrices: bool = True,
     compute_uv: bool = True,
     subset_by_index: tuple[int, int] | None = None,
+    algorithm: SvdAlgorithm | None = None,
 ) -> Array | tuple[Array, Array, Array]:
   """Singular value decomposition.
 
@@ -361,6 +372,7 @@ def svd(
       full_matrices=full_matrices,
       compute_uv=compute_uv,
       subset_by_index=subset_by_index,
+      algorithm=algorithm,
   )
   if compute_uv:
     s, u, v = result
@@ -709,8 +721,7 @@ def _eig_cpu_lowering(ctx, operand, *, compute_left_eigenvectors,
   out_aval = ctx.avals_out[0]
   batch_dims = operand_aval.shape[:-2]
   op_shape_vals = mlir.eval_dynamic_shape_as_ivals(ctx, operand_aval.shape)
-  ctx_args = (ctx,)
-  w, vl, vr, info = lapack.geev_hlo(*ctx_args, operand_aval.dtype, operand,
+  w, vl, vr, info = lapack.geev_hlo(ctx, operand_aval.dtype, operand,
                                     input_shape_vals=op_shape_vals,
                                     jobvl=compute_left_eigenvectors,
                                     jobvr=compute_right_eigenvectors)
@@ -875,7 +886,7 @@ def _eigh_abstract_eval(operand, *, lower, sort_eigenvalues, subset_by_index):
   if isinstance(operand, ShapedArray):
     if operand.ndim < 2 or operand.shape[-2] != operand.shape[-1]:
       raise ValueError(
-        "Argument to symmetric eigendecomposition must have shape [..., n, n],"
+        "Argument to symmetric eigendecomposition must have shape [..., n, n], "
         "got shape {}".format(operand.shape))
 
     batch_dims = operand.shape[:-2]
@@ -896,33 +907,39 @@ def _eigh_abstract_eval(operand, *, lower, sort_eigenvalues, subset_by_index):
 
 
 def _eigh_cpu_gpu_lowering(
-    syevd_impl, ctx, operand, *, lower, sort_eigenvalues, subset_by_index,
-    platform=None
+    ctx, operand, *, lower, sort_eigenvalues, subset_by_index,
+    target_name_prefix: str
 ):
   del sort_eigenvalues  # The CPU/GPU implementations always sort.
   operand_aval, = ctx.avals_in
   v_aval, w_aval = ctx.avals_out
   n = operand_aval.shape[-1]
-  batch_dims = operand_aval.shape[:-2]
-
-  # The eigh implementation on CPU and GPU uses lapack helper routines to
-  # find the size of the workspace based on the non-batch dimensions.
-  # Therefore, we cannot yet support dynamic non-batch dimensions.
-  if not is_constant_shape(operand_aval.shape[-2:]):
-    raise NotImplementedError(
-        "Shape polymorphism for native lowering for eigh is implemented "
-        f"only for the batch dimensions: {operand_aval.shape}")
-
   if not (subset_by_index is None or subset_by_index == (0, n)):
-    raise NotImplementedError("subset_by_index not implemented for CPU and GPU")
+    raise NotImplementedError("subset_by_index not supported on CPU and GPU")
+  batch_dims = operand_aval.shape[:-2]
+  nb = len(batch_dims)
+  layout = (nb, nb + 1) + tuple(range(nb - 1, -1, -1))
+  result_layouts = [layout, tuple(range(nb, -1, -1)),
+                    tuple(range(nb - 1, -1, -1))]
+  if target_name_prefix == "cpu":
+    dtype = operand_aval.dtype
+    prefix = "he" if dtypes.issubdtype(dtype, np.complexfloating) else "sy"
+    target_name = lapack.prepare_lapack_call(f"{prefix}evd_ffi",
+                                             operand_aval.dtype)
+    kwargs = {
+      "mode": np.uint8(ord("V")),
+      "uplo": np.uint8(ord("L" if lower else "U")),
+    }
+  else:
+    target_name = f"{target_name_prefix}solver_syevd_ffi"
+    kwargs = {"lower": lower, "algorithm": np.uint8(0)}
 
-  op_shape_vals = mlir.eval_dynamic_shape_as_ivals(ctx, operand_aval.shape)
-  cpu_args = []
-  if platform == "cpu":
-    ctx_args = (ctx,)
-    cpu_args.extend(ctx_args)
-  v, w, info = syevd_impl(*cpu_args, operand_aval.dtype, operand,
-                          a_shape_vals=op_shape_vals, lower=lower)
+  rule = ffi.ffi_lowering(target_name, operand_layouts=[layout],
+                          result_layouts=result_layouts,
+                          operand_output_aliases={0: 0})
+  info_aval = ShapedArray(batch_dims, np.dtype(np.int32))
+  sub_ctx = ctx.replace(avals_out=[v_aval, w_aval, info_aval])
+  v, w, info = rule(sub_ctx, operand, **kwargs)
 
   zeros = mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.dtype(np.int32)))
   ok = mlir.compare_hlo(info, zeros, "EQ", "SIGNED")
@@ -1056,19 +1073,14 @@ ad.primitive_jvps[eigh_p] = _eigh_jvp_rule
 batching.primitive_batchers[eigh_p] = _eigh_batching_rule
 
 mlir.register_lowering(
-    eigh_p, partial(_eigh_cpu_gpu_lowering, lapack.syevd_hlo, platform='cpu'),
+    eigh_p, partial(_eigh_cpu_gpu_lowering, target_name_prefix='cpu'),
     platform='cpu')
-
-if gpu_solver is not None:
-  mlir.register_lowering(
-    eigh_p, partial(_eigh_cpu_gpu_lowering, gpu_solver.cuda_syevd,
-                    platform='cuda'),
-    platform='cuda')
-  mlir.register_lowering(
-    eigh_p, partial(_eigh_cpu_gpu_lowering, gpu_solver.rocm_syevd,
-                    platform='rocm'),
-    platform='rocm')
-
+mlir.register_lowering(
+  eigh_p, partial(_eigh_cpu_gpu_lowering, target_name_prefix='cu'),
+  platform='cuda')
+mlir.register_lowering(
+  eigh_p, partial(_eigh_cpu_gpu_lowering, target_name_prefix='hip'),
+  platform='rocm')
 mlir.register_lowering(
     eigh_p, mlir.lower_fun(_eigh_tpu_impl, multiple_results=True),
     platform='tpu')
@@ -1576,7 +1588,7 @@ def _lu_solve_core(lu: Array, permutation: Array, b: Array, trans: int) -> Array
                          conjugate_a=conj)
     x = triangular_solve(lu, x, left_side=True, lower=True, unit_diagonal=True,
                          transpose_a=True, conjugate_a=conj)
-    _, ind = lax.sort_key_val(permutation, lax.iota('int32', len(permutation)))
+    _, ind = lax.sort_key_val(permutation, lax.iota('int32', permutation.shape[0]))
     x = x[ind, :]
   else:
     raise ValueError(f"'trans' value must be 0, 1, or 2, got {trans}")
@@ -1653,7 +1665,7 @@ def _geqrf_abstract_eval(operand):
   if operand.ndim < 2:
     raise ValueError("Argument to QR decomposition must have ndims >= 2")
   *batch_dims, m, n = operand.shape
-  taus = operand.update(shape=(*batch_dims, min(m, n)))
+  taus = operand.update(shape=(*batch_dims, core.min_dim(m, n)))
   return operand, taus
 
 def _geqrf_batching_rule(batched_args, batch_dims):
@@ -1682,60 +1694,20 @@ def _geqrf_lowering_rule(ctx, operand):
   )
   return op.results
 
-def _geqrf_cpu_gpu_lowering(geqrf_impl, batched_geqrf_impl, ctx, a, *,
-                            platform: str):
-  a_aval, taus_aval = ctx.avals_out
-  *batch_dims, m, n = a_aval.shape
-  # It should be possible to support fully-dynamic shapes, but since
-  # the last two dimensions (m, n) are used in more involved ways, we only
-  # support dynamic dimensions for the batch size for now.
-  if not is_constant_shape([m, n]):
-    raise NotImplementedError(
-      "Shape polymorphism for native serialization for qr on CPU and GPU is "
-      f"implemented only for the batch dimensions: {a_aval.shape}")
-  batch = math.prod(batch_dims)
-
-  if batch == 0 or m == 0 or n == 0:
-    return mlir.full_like_aval(ctx, 0, a_aval), mlir.full_like_aval(ctx, 0, taus_aval)
-
-  if not is_constant_shape(a_aval.shape):
-    if platform in ["cuda", "rocm"]:
-      # TODO(necula): remove the platform kwarg when we implement GPU support.
-      raise NotImplementedError(
-          "Shape polymorphism for native serialization for QR is not "
-          f"implemented, try to upgrade jaxlib; b/261671778; {a_aval.shape}")
-
-  if (batched_geqrf_impl is not None and batch > 1 and m // batch <= 128 and
-      n // batch <= 128):
-    a_out, taus = batched_geqrf_impl(a_aval.dtype, a)
+def _geqrf_cpu_gpu_lowering(ctx, a, *, target_name_prefix: str):
+  operand_aval, = ctx.avals_in
+  batch_dims = operand_aval.shape[:-2]
+  nb = len(batch_dims)
+  layout = (nb, nb + 1) + tuple(range(nb - 1, -1, -1))
+  result_layouts = [layout, tuple(range(nb, -1, -1))]
+  if target_name_prefix == "cpu":
+    target_name = lapack.prepare_lapack_call("geqrf_ffi", operand_aval.dtype)
   else:
-    if platform in ["cuda", "rocm"]:
-      a_out, taus, info_geqrf = geqrf_impl(a_aval.dtype, a)
-    else:
-      a_shape_vals = mlir.eval_dynamic_shape_as_ivals(ctx, a_aval.shape)
-      ctx_args = (
-          (ctx,) if platform == "cpu" else ()
-      )
-      a_out, taus, *maybe_info_geqrf = geqrf_impl(
-          *ctx_args, a_aval.dtype, a, a_shape_vals=a_shape_vals
-      )
-      if not ctx.is_forward_compat():
-        # Skip the info parameter verification for the FFI kernel.
-        return a_out, taus
-      # TODO(b/344892332): This parameter will no longer be needed after
-      #                    the forward compatibility period
-      info_geqrf = maybe_info_geqrf[0]
-    zeros = mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.dtype(np.int32)))
-    ok = mlir.compare_hlo(info_geqrf, zeros, "EQ", "SIGNED")
-    select_ok_a_aval = ShapedArray(batch_dims + [1, 1], np.dtype(np.bool_))
-    ok_a = mlir.broadcast_in_dim(ctx, ok, select_ok_a_aval,
-                                 broadcast_dimensions=range(len(batch_dims)))
-    a_out = _broadcasting_select_hlo(ctx, ok_a, select_ok_a_aval, a_out, a_aval, _nan_like_hlo(ctx, a_aval), a_aval)
-    select_ok_taus_aval = ShapedArray(batch_dims + [1], np.dtype(np.bool_))
-    ok_taus = mlir.broadcast_in_dim(ctx, ok, select_ok_taus_aval,
-                                    broadcast_dimensions=range(len(batch_dims)))
-    taus = _broadcasting_select_hlo(ctx, ok_taus, select_ok_taus_aval, taus, taus_aval, _nan_like_hlo(ctx, taus_aval), taus_aval)
-  return a_out, taus
+    target_name = f"{target_name_prefix}solver_geqrf_ffi"
+  rule = ffi.ffi_lowering(target_name, operand_layouts=[layout],
+                          result_layouts=result_layouts,
+                          operand_output_aliases={0: 0})
+  return rule(ctx, a)
 
 geqrf_p = Primitive('geqrf')
 geqrf_p.multiple_results = True
@@ -1745,20 +1717,15 @@ batching.primitive_batchers[geqrf_p] = _geqrf_batching_rule
 mlir.register_lowering(geqrf_p, _geqrf_lowering_rule)
 
 mlir.register_lowering(
-    geqrf_p, partial(_geqrf_cpu_gpu_lowering, lapack.geqrf_hlo, None,
-                     platform='cpu'),
+    geqrf_p, partial(_geqrf_cpu_gpu_lowering, target_name_prefix='cpu'),
     platform='cpu')
 mlir.register_lowering(
     geqrf_p,
-    partial(_geqrf_cpu_gpu_lowering, gpu_solver.cuda_geqrf,
-            gpu_solver.cuda_geqrf_batched,
-            platform='cuda'),
+    partial(_geqrf_cpu_gpu_lowering, target_name_prefix='cu'),
     platform='cuda')
 mlir.register_lowering(
     geqrf_p,
-    partial(_geqrf_cpu_gpu_lowering, gpu_solver.rocm_geqrf,
-            gpu_solver.rocm_geqrf_batched,
-            platform='rocm'),
+    partial(_geqrf_cpu_gpu_lowering, target_name_prefix='hip'),
     platform='rocm')
 
 
@@ -1788,7 +1755,7 @@ def _householder_product_abstract_eval(a, taus):
     raise ValueError("Argument to Householder product must have ndims >= 2")
   *batch_dims, m, n = a.shape
   *taus_batch_dims, k = taus.shape
-  if a.dtype != taus.dtype or batch_dims != taus_batch_dims or k > min(m, n):
+  if a.dtype != taus.dtype or batch_dims != taus_batch_dims or k > core.min_dim(m, n):
     raise ValueError(f"Type mismatch for Householder product: {a=} {taus=}")
   if m < n:
     raise ValueError("Householder product inputs must have at least as many "
@@ -1816,48 +1783,23 @@ def _householder_product_lowering_rule(ctx, a, taus):
       result_shapes=result_shapes)
   return [op.result]
 
-def _householder_product_cpu_gpu_lowering(orgqr_impl, ctx, a, taus, *,
-                                          platform: str):
-  a_aval, taus_aval = ctx.avals_in
-  *batch_dims, m, n = a_aval.shape
-  if not is_constant_shape([m, n]):
-    raise NotImplementedError(
-      "Shape polymorphism for native serialization for householder_product on "
-      f"CPU and GPU is implemented only for the batch dimensions: {a_aval.shape}")
-
-  if m == 0 or n == 0:
-    return [mlir.full_like_aval(ctx, 0, a_aval)]
-
-  if platform in ["rocm", "cuda"]:
-    # TODO(necula): remove the platform kwarg when we implement GPU support.
-    if not is_constant_shape(a_aval.shape):
-      raise NotImplementedError(
-          "Shape polymorphism for native serialization for householder_product "
-          f"on GPU is not implemented; b/261671778; {a_aval.shape}")
-    a, info_orgqr = orgqr_impl(a_aval.dtype, a, taus)
+def _householder_product_cpu_gpu_lowering(ctx, a, taus, *,
+                                          target_name_prefix: str):
+  a_aval, _ = ctx.avals_in
+  batch_dims = a_aval.shape[:-2]
+  nb = len(batch_dims)
+  layout = (nb, nb + 1) + tuple(range(nb - 1, -1, -1))
+  tau_layout = tuple(range(nb, -1, -1))
+  if target_name_prefix == "cpu":
+    dtype = a_aval.dtype
+    prefix = "un" if dtypes.issubdtype(dtype, np.complexfloating) else "or"
+    target_name = lapack.prepare_lapack_call(f"{prefix}gqr_ffi", dtype)
   else:
-    ctx_args = (
-        (ctx,) if platform == "cpu" else ()
-    )
-    a_shape_vals = mlir.eval_dynamic_shape_as_ivals(ctx, a_aval.shape)
-    tau_shape_vals = mlir.eval_dynamic_shape_as_ivals(ctx, taus_aval.shape)
-    a, *maybe_info_orgqr = orgqr_impl(*ctx_args, a_aval.dtype, a, taus,
-                                      a_shape_vals=a_shape_vals,
-                                      tau_shape_vals=tau_shape_vals)
-    if not ctx.is_forward_compat():
-      # Skip the info parameter verification for the FFI kernel.
-      return [a]
-    # TODO(b/344892332): This parameter will no longer be needed after
-    #                    the forward compatibility period
-    info_orgqr = maybe_info_orgqr[0]
-  zeros = mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.dtype(np.int32)))
-  ok = mlir.compare_hlo(info_orgqr, zeros, "EQ", "SIGNED")
-  select_a_aval = ShapedArray(batch_dims + [1, 1], np.dtype(np.bool_))
-  ok = mlir.broadcast_in_dim(ctx, ok, select_a_aval,
-                             broadcast_dimensions=range(len(batch_dims)))
-  a = _broadcasting_select_hlo(ctx, ok, select_a_aval, a, a_aval, _nan_like_hlo(ctx, a_aval), a_aval)
-  return [a]
-
+    target_name = f"{target_name_prefix}solver_orgqr_ffi"
+  rule = ffi.ffi_lowering(target_name, operand_layouts=[layout, tau_layout],
+                          result_layouts=[layout],
+                          operand_output_aliases={0: 0})
+  return rule(ctx, a, taus)
 
 householder_product_p = Primitive('householder_product')
 householder_product_p.def_impl(partial(dispatch.apply_primitive, householder_product_p))
@@ -1867,18 +1809,15 @@ mlir.register_lowering(householder_product_p, _householder_product_lowering_rule
 
 mlir.register_lowering(
     householder_product_p,
-    partial(_householder_product_cpu_gpu_lowering, lapack.orgqr_hlo,
-            platform='cpu'),
+    partial(_householder_product_cpu_gpu_lowering, target_name_prefix='cpu'),
     platform='cpu')
 mlir.register_lowering(
     householder_product_p,
-    partial(_householder_product_cpu_gpu_lowering, gpu_solver.cuda_orgqr,
-            platform='cuda'),
+    partial(_householder_product_cpu_gpu_lowering, target_name_prefix='cu'),
     platform='cuda')
 mlir.register_lowering(
     householder_product_p,
-    partial(_householder_product_cpu_gpu_lowering, gpu_solver.rocm_orgqr,
-            platform='rocm'),
+    partial(_householder_product_cpu_gpu_lowering, target_name_prefix='hip'),
     platform='rocm')
 
 
@@ -1891,7 +1830,7 @@ def _qr_abstract_eval(operand, *, full_matrices):
     if operand.ndim < 2:
       raise ValueError("Argument to QR decomposition must have ndims >= 2")
     *batch_dims, m, n = operand.shape
-    k = m if full_matrices else min(m, n)
+    k = m if full_matrices else core.min_dim(m, n)
     q = operand.update(shape=(*batch_dims, m, k))
     r = operand.update(shape=(*batch_dims, k, n))
   else:
@@ -1928,7 +1867,7 @@ def _qr_batching_rule(batched_args, batch_dims, *, full_matrices):
 def _qr_lowering(a, *, full_matrices):
   *batch_dims, m, n = a.shape
   if m == 0 or n == 0:
-    k = m if full_matrices else min(m, n)
+    k = m if full_matrices else core.min_dim(m, n)
     q = lax.broadcast_in_dim(lax_internal._eye(a.dtype, (m, k)),
                              (*batch_dims, m, k),
                              (len(batch_dims), len(batch_dims) + 1))
@@ -1961,22 +1900,26 @@ mlir.register_lowering(qr_p, mlir.lower_fun(_qr_lowering))
 
 
 # Singular value decomposition
-def _svd_impl(operand, *, full_matrices, compute_uv, subset_by_index=None):
+def _svd_impl(operand, *, full_matrices, compute_uv, subset_by_index=None,
+              algorithm=None):
   return dispatch.apply_primitive(
       svd_p,
       operand,
       full_matrices=full_matrices,
       compute_uv=compute_uv,
       subset_by_index=subset_by_index,
+      algorithm=algorithm,
   )
 
 
-def _svd_abstract_eval(operand, *, full_matrices, compute_uv, subset_by_index):
+def _svd_abstract_eval(operand, *, full_matrices, compute_uv, subset_by_index,
+                       algorithm=None):
+  del algorithm  # unused
   if isinstance(operand, ShapedArray):
     batch_dims = operand.shape[:-2]
     m = operand.shape[-2]
     n = operand.shape[-1]
-    rank = min(m, n)
+    rank = core.min_dim(m, n)
     if subset_by_index is not None:
       if full_matrices and subset_by_index != (0, rank):
         raise ValueError("full_matrices and subset_by_index cannot both be set")
@@ -1998,12 +1941,14 @@ def _svd_abstract_eval(operand, *, full_matrices, compute_uv, subset_by_index):
 
 @config.default_matmul_precision("float32")
 def _svd_jvp_rule(
-    primals, tangents, *, full_matrices, compute_uv, subset_by_index
+    primals, tangents, *, full_matrices, compute_uv, subset_by_index,
+    algorithm=None,
 ):
   A, = primals
   dA, = tangents
   s, U, Vt = svd_p.bind(
-      A, full_matrices=False, compute_uv=True, subset_by_index=subset_by_index
+      A, full_matrices=False, compute_uv=True, subset_by_index=subset_by_index,
+      algorithm=algorithm,
   )
 
   if compute_uv and full_matrices:
@@ -2064,24 +2009,18 @@ def _empty_svd(a, *, full_matrices, compute_uv):
 
 
 def _svd_cpu_gpu_lowering(
-    gesvd_impl,
     ctx,
     operand,
     *,
     full_matrices,
     compute_uv,
     subset_by_index,
-    platform: str,
+    target_name_prefix: str,
+    algorithm=None,
 ):
   operand_aval, = ctx.avals_in
   s_aval = ctx.avals_out[0]
   m, n = operand_aval.shape[-2:]
-  # Since the last two dimensions (m, n) are used to compute the workspace
-  # size, we support dynamic dimensions only for the batch size for now.
-  if not is_constant_shape([m, n]):
-    raise NotImplementedError(
-      "Shape polymorphism for native serialization for svd on CPU and GPU is "
-      f"implemented only for the batch dimensions: {operand_aval.shape}")
   batch_dims = operand_aval.shape[:-2]
 
   if not (subset_by_index is None or subset_by_index == (0, min(m, n))):
@@ -2094,23 +2033,43 @@ def _svd_cpu_gpu_lowering(
         full_matrices=full_matrices,
         compute_uv=compute_uv,
     )
-
-  if platform in ["cuda", "rocm"]:
-    if not is_constant_shape(operand_aval.shape):
-      # TODO(necula): remove the platform kwarg when we implement GPU support.
+  if target_name_prefix == "cpu":
+    if algorithm is not None and algorithm != SvdAlgorithm.DEFAULT:
       raise NotImplementedError(
-          "Shape polymorphism for native serialization for SVD is not "
-          f"implemented, try to upgrade jaxlib; b/261671778; {operand_aval.shape}")
-    s, u, vt, info = gesvd_impl(operand_aval.dtype, operand,
-                                full_matrices=full_matrices,
-                                compute_uv=compute_uv)
+          "The SVD algorithm parameter is not implemented on CPU.")
+    target_name = lapack.prepare_lapack_call("gesdd_ffi", operand_aval.dtype)
+    nb = len(batch_dims)
+    layout = (nb, nb + 1) + tuple(range(nb - 1, -1, -1))
+    result_layouts = [layout, tuple(range(nb, -1, -1)), layout, layout,
+                      tuple(range(nb - 1, -1, -1))]
+    mode = lapack._svd_computation_attr(compute_uv=compute_uv,
+                                        full_matrices=full_matrices)
+    rule = ffi.ffi_lowering(target_name, operand_layouts=[layout],
+                            result_layouts=result_layouts,
+                            operand_output_aliases={0: 0})
+    info_aval = ShapedArray(batch_dims, np.dtype(np.int32))
+    if compute_uv:
+      s_aval, u_aval, vt_aval = ctx.avals_out
+    else:
+      s_aval, = ctx.avals_out
+      # TODO(danfm): It should be possible to skip instantiating these arrays
+      # when they are not used.
+      u_aval = ShapedArray((*batch_dims, m,
+                            m if full_matrices else core.min_dim(m, n)),
+                           operand_aval.dtype)
+      vt_aval = ShapedArray((*batch_dims,
+                             n if full_matrices else core.min_dim(m, n), n),
+                            operand_aval.dtype)
+    sub_ctx = ctx.replace(avals_out=[operand_aval, s_aval, u_aval, vt_aval,
+                                     info_aval])
+    _, s, u, vt, info = rule(sub_ctx, operand, mode=mode)
   else:
-    a_shape_vals = mlir.eval_dynamic_shape_as_ivals(ctx, operand_aval.shape)
-    ctx_args = (ctx,)
-    s, u, vt, info = gesvd_impl(*ctx_args, operand_aval.dtype, operand,
-                                full_matrices=full_matrices,
-                                compute_uv=compute_uv,
-                                a_shape_vals=a_shape_vals)
+    s, u, vt, info = _svd_gpu_sub_lowering(ctx, operand,
+                                           full_matrices=full_matrices,
+                                           compute_uv=compute_uv,
+                                           target_name_prefix=target_name_prefix,
+                                           algorithm=algorithm)
+
   zeros = mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.dtype(np.int32)))
   ok = mlir.compare_hlo(info, zeros, "EQ", "SIGNED")
   select_s_aval = ShapedArray(batch_dims + (1,), np.dtype(np.bool_))
@@ -2143,9 +2102,115 @@ def _svd_cpu_gpu_lowering(
   return result
 
 
-def _svd_tpu(a, *, full_matrices, compute_uv, subset_by_index):
-  batch_dims = a.shape[:-2]
+def _svd_gpu_sub_lowering(ctx, operand, *, full_matrices, compute_uv,
+                          target_name_prefix, algorithm):
+  operand_aval, = ctx.avals_in
+  if compute_uv:
+    s_aval, u_aval, vt_aval = ctx.avals_out
+  else:
+    s_aval, = ctx.avals_out
+    u_aval = vt_aval = ShapedArray((), operand_aval.dtype)
+  batch_dims = operand_aval.shape[:-2]
+  info_aval = ShapedArray(batch_dims, np.dtype(np.int32))
+  nb = len(batch_dims)
+  m, n = operand_aval.shape[-2:]
+  k = core.min_dim(m, n)
 
+  transposed = False
+  kwargs = {}
+
+  # The Jacobi algorithm appears to outperform the default QR algorithm for
+  # small to medium sized matrices. See:
+  # https://developer.download.nvidia.com/video/gputechconf/gtc/2019/presentation/s9226-fast-singular-value-decomposition-on-gpus-v2.pdf
+  # slide 5. With this in mind, we default to using the Jacobi algorithm for
+  # matrices smaller than 1024x1024.
+  #
+  # Note that the Jacobi algorithm is only used by default for matrices with
+  # concrete matrix dimensions. When using dynamic shapes, we always use the
+  # default QR algorithm, but users can (in principle) override this behavior
+  # by passing `use_jacobi=True`.
+  #
+  # TODO(danfm): Since this was originally implemented, hipSolver appers to
+  # have added support for the Jacobi algorithm, so we should investigate
+  # removing this condition.
+  if algorithm is None or algorithm == SvdAlgorithm.DEFAULT:
+    try:
+      use_jacobi = target_name_prefix == "cu" and m <= 1024 and n <= 1024
+    except core.InconclusiveDimensionOperation:
+      use_jacobi = False
+  else:
+    use_jacobi = algorithm == SvdAlgorithm.JACOBI
+  if use_jacobi:
+    target_name = f"{target_name_prefix}solver_gesvdj_ffi"
+    # The gesvdjbatched kernel doesn't support "econ" mode, but it also only
+    # supports matrices up to 32x32, so it's always worth using the batched
+    # version and then slicing afterwards when the matrix is small enough.
+    try:
+      econ = not full_matrices and m > 32 and n > 32
+    except core.InconclusiveDimensionOperation:
+      econ = False
+    layout = (nb, nb + 1) + tuple(range(nb - 1, -1, -1))
+  else:
+    target_name = f"{target_name_prefix}solver_gesvd_ffi"
+    econ = not full_matrices
+    # Because the base gesvd kernel only supports matrices where m >= n, we.
+    transposed = m < n
+    kwargs = {"transposed": transposed}
+    if transposed:
+      layout = tuple(range(nb + 1, -1, -1))
+    else:
+      layout = (nb, nb + 1) + tuple(range(nb - 1, -1, -1))
+
+  result_layouts = [layout, tuple(range(nb, -1, -1)),
+                    layout if use_jacobi or compute_uv else (),
+                    layout if use_jacobi or compute_uv else (),
+                    tuple(range(nb - 1, -1, -1))]
+  rule = ffi.ffi_lowering(target_name, operand_layouts=[layout],
+                          result_layouts=result_layouts,
+                          operand_output_aliases={0: 0})
+  if use_jacobi:
+    # When using the Jacobi algorithm, the U and V matrices must always be
+    # allocated even if compute_uv is False.
+    u_aval = ShapedArray((*batch_dims, m, k if econ else m), u_aval.dtype)
+    v_aval = ShapedArray((*batch_dims, n, k if econ else n), vt_aval.dtype)
+    sub_ctx = ctx.replace(avals_out=[operand_aval, s_aval, u_aval, v_aval,
+                                     info_aval])
+  elif transposed:
+    sub_ctx = ctx.replace(avals_out=[operand_aval, s_aval, vt_aval, u_aval,
+                                     info_aval])
+  else:
+    sub_ctx = ctx.replace(avals_out=[operand_aval, s_aval, u_aval, vt_aval,
+                                     info_aval])
+  _, s, u, vt, info = rule(sub_ctx, operand, full_matrices=not econ,
+                           compute_uv=compute_uv, **kwargs)
+  if use_jacobi and compute_uv:
+    vt = hlo.transpose(
+        vt,
+        mlir.dense_int_array(np.array(tuple(range(nb)) + (nb + 1, nb))))
+    if np.issubdtype(operand_aval.dtype, np.complexfloating):
+      vt = hlo.complex(hlo.real(vt), hlo.negate(hlo.imag(vt)))
+    if not full_matrices and not econ:
+      nd = len(operand_aval.shape)
+      u = mlir.slice_op(ctx, u, ctx.avals_out[1],
+                        start_indices=np.zeros([nd], np.int64),
+                        limit_indices=batch_dims + (m, k),
+                        strides=np.ones([nd], np.int64))
+      vt = mlir.slice_op(ctx, vt, ctx.avals_out[2],
+                         start_indices=np.zeros([nd], np.int64),
+                         limit_indices=batch_dims + (k, n),
+                         strides=np.ones([nd], np.int64))
+  if transposed:
+    return s, vt, u, info
+  else:
+    return s, u, vt, info
+
+
+def _svd_tpu(a, *, full_matrices, compute_uv, subset_by_index, algorithm=None):
+  if algorithm is not None and algorithm != SvdAlgorithm.DEFAULT:
+    raise NotImplementedError(
+        "The SVD algorithm parameter is not implemented on TPU.")
+
+  batch_dims = a.shape[:-2]
   fn = partial(
       lax_svd.svd,
       full_matrices=full_matrices,
@@ -2164,8 +2229,9 @@ def _svd_tpu(a, *, full_matrices, compute_uv, subset_by_index):
 
 
 def _svd_tpu_lowering_rule(
-    ctx, operand, *, full_matrices, compute_uv, subset_by_index
+    ctx, operand, *, full_matrices, compute_uv, subset_by_index, algorithm=None
 ):
+  del algorithm  # unused
   operand_aval, = ctx.avals_in
   m, n = operand_aval.shape[-2:]
 
@@ -2187,7 +2253,8 @@ def _svd_tpu_lowering_rule(
 
 
 def _svd_batching_rule(
-    batched_args, batch_dims, *, full_matrices, compute_uv, subset_by_index
+    batched_args, batch_dims, *, full_matrices, compute_uv, subset_by_index,
+    algorithm=None,
 ):
   x, = batched_args
   bd, = batch_dims
@@ -2197,6 +2264,7 @@ def _svd_batching_rule(
       full_matrices=full_matrices,
       compute_uv=compute_uv,
       subset_by_index=subset_by_index,
+      algorithm=algorithm,
   )
 
   if compute_uv:
@@ -2213,18 +2281,14 @@ ad.primitive_jvps[svd_p] = _svd_jvp_rule
 batching.primitive_batchers[svd_p] = _svd_batching_rule
 
 mlir.register_lowering(
-    svd_p, partial(_svd_cpu_gpu_lowering, lapack.gesdd_hlo,
-                   platform='cpu'),
+    svd_p, partial(_svd_cpu_gpu_lowering, target_name_prefix='cpu'),
     platform='cpu')
 mlir.register_lowering(
-  svd_p, partial(_svd_cpu_gpu_lowering, gpu_solver.cuda_gesvd,
-                 platform='cuda'),
-  platform='cuda')
+    svd_p, partial(_svd_cpu_gpu_lowering, target_name_prefix='cu'),
+    platform='cuda')
 mlir.register_lowering(
-  svd_p, partial(_svd_cpu_gpu_lowering, gpu_solver.rocm_gesvd,
-                 platform='rocm'),
-  platform='rocm')
-
+    svd_p, partial(_svd_cpu_gpu_lowering, target_name_prefix='hip'),
+    platform='rocm')
 mlir.register_lowering(svd_p, _svd_tpu_lowering_rule)
 
 
@@ -2550,9 +2614,7 @@ batching.primitive_batchers[hessenberg_p] = _hessenberg_batching_rule
 def _hessenberg_cpu_hlo(ctx, a):
   a_aval, = ctx.avals_in
   batch_dims = a_aval.shape[:-2]
-  # TODO(b/344892332): Remove the conditional after the compatibility period.
-  ctx_args = (ctx,) if jaxlib_version >= (0, 4, 34) else ()
-  a, taus, info = lapack.gehrd_hlo(*ctx_args, a_aval.dtype, a)
+  a, taus, info = lapack.gehrd_hlo(ctx, a_aval.dtype, a)
   ok = mlir.compare_hlo(
       info, mlir.full_like_aval(ctx, 0, ShapedArray(batch_dims, np.dtype(np.int32))),
       "EQ", "SIGNED")

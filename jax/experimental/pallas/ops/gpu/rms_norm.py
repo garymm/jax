@@ -18,15 +18,13 @@ from __future__ import annotations
 
 import functools
 
-from typing import Optional
-
 import jax
 from jax import lax
 import jax.numpy as jnp
 from jax._src.lax.control_flow.for_loop import for_loop
 
 from jax.experimental import pallas as pl
-from jax.experimental.pallas import gpu as plgpu
+from jax.experimental.pallas import triton as plgpu
 
 def rms_norm_forward_kernel(
     x_ref, weight_ref, bias_ref, # Input arrays

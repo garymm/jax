@@ -31,8 +31,7 @@ from jax.experimental.sparse._base import JAXSparse
 from jax.experimental.sparse import bcoo
 from jax.experimental.sparse.util import (
     nfold_vmap, _count_stored_elements,
-    _csr_to_coo, _dot_general_validated_shape,
-    CuSparseEfficiencyWarning, SparseInfo, Shape)
+    _csr_to_coo, CuSparseEfficiencyWarning, SparseInfo, Shape)
 from jax.util import split_list, safe_zip
 
 from jax._src import api_util
@@ -463,9 +462,7 @@ bcsr_dot_general_p = core.Primitive('bcsr_dot_general')
 def bcsr_dot_general(lhs: BCSR | Array, rhs: Array, *,
                      dimension_numbers: DotDimensionNumbers,
                      precision: None = None,
-                     preferred_element_type: None = None,
-                     algorithm: None = None,
-                     transpose_algorithm: None = None) -> Array:
+                     preferred_element_type: None = None) -> Array:
   """A general contraction operation.
 
   Args:
@@ -476,15 +473,13 @@ def bcsr_dot_general(lhs: BCSR | Array, rhs: Array, *,
       (lhs_batch_dims, rhs_batch_dims))`.
     precision: unused
     preferred_element_type: unused
-    algorithm: unused
-    transpose_algorithm: unused
 
   Returns:
     An ndarray or BCSR-format sparse array containing the result. If both inputs
     are sparse, the result will be sparse, of type BCSR. If either input is
     dense, the result will be dense, of type ndarray.
   """
-  del precision, algorithm, transpose_algorithm  # unused
+  del precision  # unused
   if isinstance(rhs, (np.ndarray, jax.Array)):
     if isinstance(lhs, (np.ndarray, jax.Array)):
       return lax.dot_general(lhs, rhs, dimension_numbers=dimension_numbers,

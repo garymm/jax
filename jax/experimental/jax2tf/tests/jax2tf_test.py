@@ -317,6 +317,8 @@ class Jax2TfTest(tf_test_util.JaxToTfTestCase):
 
   @jtu.sample_product(with_function=[False, True])
   def test_gradients_disabled(self, with_function=False):
+    if tf.version.VERSION.split(".") <= ["2", "17", "0"]:
+      self.skipTest("This test works only with newer versions of TF")
     f_tf = jax2tf.convert(jnp.tan, with_gradient=False)
     if with_function:
       f_tf = tf.function(f_tf, autograph=False)
@@ -1686,6 +1688,15 @@ class Jax2TfTest(tf_test_util.JaxToTfTestCase):
       self.assertAllClose(
         res,
         x + _testing_multi_platform_to_add[tf_device_jax_platform])
+
+  def test_dot_algorithm_non_native_unsupported(self):
+    def f_jax(x):
+      return jax.lax.dot(x, x, precision="F32_F32_F32")
+
+    x = np.ones((128, 128), dtype=np.float32)
+    with self.assertRaisesRegex(NotImplementedError,
+                                "Unsupported precision in dot_general"):
+      jax2tf.convert(f_jax, native_serialization=False)(x)
 
 
 @jtu.with_config(jax_enable_custom_prng=True)
