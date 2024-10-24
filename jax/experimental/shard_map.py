@@ -52,7 +52,7 @@ from jax._src.lax import (lax, parallel as lax_parallel, slicing,
                           windowed_reductions, convolution, fft, linalg,
                           special, control_flow, ann)
 from jax._src.lib.mlir import ir
-from jax._src.lib.mlir.dialects import hlo, sdy
+from jax._src.lib.mlir.dialects import sdy
 from jax._src.util import (HashableFunction, HashablePartial, unzip2, unzip3,
                            as_hashable_function, memoize, partition_list,
                            merge_lists, split_list, subs_list2)
@@ -663,8 +663,8 @@ def _shard_map_lowering_shardy(
     # Nested `ManualComputationOp`s cannot refer to axes that are already
     # manual. So figure out what axes are free thus far and get the new axis
     # context.
-    free_axis = frozenset(mesh.axis_names) - ctx.module_context.axis_context.manual_axes
-    new_axis_context = sharding_impls.SPMDAxisContext(mesh, free_axis - auto)
+    free_axes = frozenset(mesh.axis_names) - ctx.module_context.axis_context.manual_axes
+    new_axis_context = sharding_impls.SPMDAxisContext(mesh, free_axes - auto)
   else:
     new_axis_context = sharding_impls.SPMDAxisContext(
         mesh, frozenset(mesh.axis_names) - auto)
@@ -676,9 +676,10 @@ def _shard_map_lowering_shardy(
   manual_axes_size = np.prod([mesh_shape[a] for a in manual_axes])
   if manual_axes_size == 1:
     # No need for a `ManualComputationOp` if all manual axes are size 1.
-    out_nodes, _ = mlir.jaxpr_subcomp(
-        sub_ctx, jaxpr, ctx.name_stack, mlir.TokenSet(), (), *args,
-        dim_var_values=ctx.dim_var_values)
+    with core.extend_axis_env_nd(tuple(mesh.shape.items())):
+      out_nodes, _ = mlir.jaxpr_subcomp(
+          sub_ctx, jaxpr, ctx.name_stack, mlir.TokenSet(), (), *args,
+          dim_var_values=ctx.dim_var_values)
     return out_nodes
 
   in_shardings = sdy.TensorShardingPerValueAttr.get(map(
@@ -1651,7 +1652,7 @@ def _shard_map_transpose(out_cts, *args, jaxpr, mesh, in_names, out_names,
                          check_rep, rewrite, auto):
   mb_div = lambda x, y: x / y if y != 1 else x
   out_cts = [ad.Zero(_shard_aval(mesh, ns, x.aval)) if type(x) is ad.Zero
-      else x if rewrite
+      else x if rewrite or dtypes.dtype(x) == dtypes.float0
       else mb_div(x, prod(map(mesh.shape.get, _unmentioned2(mesh, ns))))
       for ns, x in zip(out_names, out_cts)]
   args = [x if type(x) is not ad.UndefinedPrimal else

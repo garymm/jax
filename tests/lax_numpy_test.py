@@ -2785,7 +2785,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
                                 message="NumPy will stop allowing conversion.*"):
           out_int64 = jax.eval_shape(jnp.searchsorted, a_int64, v)
     else:
-      with self.assertWarnsRegex(UserWarning, "Explicitly requested dtype int64"):
+      with self.assertWarnsRegex(UserWarning, "Explicitly requested dtype.*int64"):
         with self.assertRaisesRegex(OverflowError, "Python integer 2147483648 out of bounds.*"):
           out_int64 = jax.eval_shape(jnp.searchsorted, a_int64, v)
 
@@ -2992,6 +2992,12 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     jnp_fun = lambda x: jnp.diff(x, n=n, axis=axis, prepend=prepend, append=append)
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, check_dtypes=False)
     self._CompileAndCheck(jnp_fun, args_maker)
+
+  def testDiffBool(self):
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng((10,), bool)]
+    self._CheckAgainstNumpy(np.diff, jnp.diff, args_maker, check_dtypes=False)
+    self._CompileAndCheck(jnp.diff, args_maker)
 
   def testDiffPrepoendScalar(self):
     # Regression test for https://github.com/jax-ml/jax/issues/19362
@@ -3774,6 +3780,14 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         jnp.array(bytearray(b'\x2a\xf3'), ndmin=2),
         np.array(bytearray(b'\x2a\xf3'), ndmin=2)
     )
+
+  @jtu.sample_product(value=[False, 1, 1.0, np.int32(5), np.array(16)])
+  def testIsScalar(self, value):
+    self.assertTrue(jnp.isscalar(value))
+
+  @jtu.sample_product(value=[None, [1], slice(4), (), np.array([0])])
+  def testIsNotScalar(self, value):
+    self.assertFalse(jnp.isscalar(value))
 
   @jtu.sample_product(val=[1+1j, [1+1j], jnp.pi, np.arange(2)])
   def testIsComplexObj(self, val):
@@ -6341,8 +6355,9 @@ class NumpyDocTests(jtu.JaxTestCase):
 
     unimplemented = ['fromfile', 'fromiter']
     aliases = ['abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'atan2',
-               'amax', 'amin', 'around', 'bitwise_right_shift', 'conj', 'degrees',
-               'divide', 'mod', 'pow', 'radians', 'round_']
+               'amax', 'amin', 'around', 'bitwise_invert', 'bitwise_left_shift',
+               'bitwise_not','bitwise_right_shift', 'conj', 'degrees', 'divide',
+               'mod', 'pow', 'radians', 'round_']
     skip_args_check = ['vsplit', 'hsplit', 'dsplit', 'array_split']
 
     for name in dir(jnp):

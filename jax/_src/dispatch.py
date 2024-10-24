@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import atexit
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
 import enum
@@ -46,14 +46,14 @@ from jax._src.interpreters import mlir
 from jax._src.interpreters import xla
 from jax._src.interpreters import pxla
 from jax._src import lib
-from jax._src.mesh import AbstractMesh
+from jax._src.mesh import AbstractMesh, Mesh
 from jax._src.lib import xla_client as xc
 from jax._src.monitoring import record_event_duration_secs
 from jax._src.partition_spec import PartitionSpec
 from jax._src.sharding import Sharding
 from jax._src.sharding_impls import (
-    SingleDeviceSharding, NamedSharding,
-    GSPMDSharding, TransferToMemoryKind, is_single_device_sharding)
+    SingleDeviceSharding, NamedSharding, TransferToMemoryKind,
+    is_single_device_sharding)
 from jax._src.layout import Layout, DeviceLocalLayout
 
 
@@ -207,6 +207,7 @@ def jaxpr_has_primitive(jaxpr: core.Jaxpr, prim_name: str) -> bool:
 # stablehlo is oblivious of physical devices.
 prim_requires_devices_during_lowering: set[core.Primitive] = set()
 
+@util.weakref_lru_cache
 def jaxpr_has_prim_requiring_devices(jaxpr: core.Jaxpr) -> bool:
   for eqn in jaxpr.eqns:
     if eqn.primitive in prim_requires_devices_during_lowering:
@@ -222,38 +223,40 @@ class SourceInfo(NamedTuple):
   eqn_name: str
 
 
+@util.weakref_lru_cache
 def get_intermediate_shardings(
-    jaxpr: core.Jaxpr,
-) -> Iterator[tuple[Sharding, SourceInfo]]:
+    jaxpr: core.Jaxpr) -> Sequence[tuple[Sharding, SourceInfo]]:
   from jax._src import pjit
   from jax.experimental import shard_map
 
+  out = []
   for eqn in jaxpr.eqns:
     if eqn.primitive is pjit.sharding_constraint_p:
       s = eqn.params['sharding']
       if isinstance(s, NamedSharding) and isinstance(s.mesh, AbstractMesh):
         continue
       source_info = SourceInfo(eqn.source_info, eqn.primitive.name)
-      yield (s, source_info)
+      out.append((s, source_info))
     elif eqn.primitive is pjit.pjit_p:
       source_info = SourceInfo(eqn.source_info, eqn.primitive.name)
-      yield from ((i, source_info) for i in eqn.params['in_shardings'])
-      yield from ((o, source_info) for o in eqn.params['out_shardings'])
+      out.extend((i, source_info) for i in eqn.params['in_shardings'])
+      out.extend((o, source_info) for o in eqn.params['out_shardings'])
     elif eqn.primitive is shard_map.shard_map_p:
-      if not eqn.params['mesh']._is_jax_device_mesh:
+      if isinstance(eqn.params['mesh'], AbstractMesh):
         continue
       source_info = SourceInfo(eqn.source_info, eqn.primitive.name)
       def _names_to_pspec(names):
         ndmin = max(names) + 1 if names else 0
         return PartitionSpec(*(names.get(i) for i in range(ndmin)))
-      yield from ((NamedSharding(eqn.params['mesh'], _names_to_pspec(names)), source_info)
-                  for names in [*eqn.params['in_names'], *eqn.params['out_names']])
+      out.extend((NamedSharding(eqn.params['mesh'], _names_to_pspec(names)), source_info)
+                 for names in [*eqn.params['in_names'], *eqn.params['out_names']])
     elif eqn.primitive is device_put_p:
       source_info = SourceInfo(eqn.source_info, eqn.primitive.name)
-      yield from ((s, source_info) for s in eqn.params['devices']
-                  if isinstance(s, Sharding) and s.memory_kind is not None)
+      out.extend((s, source_info) for s in eqn.params['devices']
+                 if isinstance(s, Sharding) and s.memory_kind is not None)
   for subjaxpr in core.subjaxprs(jaxpr):
-    yield from get_intermediate_shardings(subjaxpr)
+    out.extend(get_intermediate_shardings(subjaxpr))
+  return out
 
 
 def jaxpr_has_bints(jaxpr: core.Jaxpr) -> bool:
@@ -340,6 +343,7 @@ def _identity_fn(x):
 def _different_device_order_reshard(x, target_sharding, copy: CopySemantics):
   x._check_if_deleted()
   inp_sharding = x.sharding
+  assert isinstance(inp_sharding, NamedSharding)
 
   donate_argnums = 0 if copy == CopySemantics.DONATE else None
   if inp_sharding._device_assignment == target_sharding._device_assignment:
@@ -356,39 +360,21 @@ def _different_device_order_reshard(x, target_sharding, copy: CopySemantics):
                      f"platform {inp_plat} and target sharding's device set "
                      f"ids: {target_ids} on platform {target_plat}")
 
-  old_hlo_sharding = inp_sharding._to_xla_hlo_sharding(x.ndim)
-  if old_hlo_sharding.is_replicated():
-    new_hlo_sharding = old_hlo_sharding
+  if inp_sharding.is_fully_replicated:
+    permute_order = None
   else:
     permute_order = np.vectorize(target_sharding._device_assignment.index,
-                                 otypes=[int])(inp_sharding._device_assignment)
-    # Unfortunately need to fallback to V1 sharding here.
-    new_op_sharding = old_hlo_sharding.to_proto()
-    new_op_sharding.iota_reshape_dims = []
-    new_op_sharding.iota_transpose_perm = []
-    new_op_sharding.tile_assignment_devices = np.take(
-        permute_order, old_hlo_sharding.tile_assignment_devices()
-    )
-    new_hlo_sharding = xc.HloSharding.from_proto(new_op_sharding)
-    # TODO(yashkatariya): Enable this when HloSharding conversion is fixed in
-    # XLA.
-    # assert (new_op_sharding.tile_assignment_dimensions
-    #         == new_hlo_sharding.tile_assignment_dimensions())
-    # assert (new_op_sharding.tile_assignment_devices
-    #         == new_hlo_sharding.tile_assignment_devices())
-    assert (list(np.take(inp_sharding._device_assignment,
-                         old_hlo_sharding.tile_assignment_devices()))
-            == list(np.take(target_sharding._device_assignment,
-                            new_op_sharding.tile_assignment_devices)))
-
-  new_x = array.make_array_from_single_device_arrays(
-      x.shape,
-      GSPMDSharding(target_sharding._device_assignment, new_hlo_sharding,
-                    memory_kind=target_sharding.memory_kind),
-      x._arrays,
-  )
+                                  otypes=[int])(inp_sharding._device_assignment)
+  new_mesh = Mesh(
+      target_sharding.mesh.devices.reshape(inp_sharding.mesh.axis_sizes),
+      inp_sharding.mesh.axis_names)
+  new_s = NamedSharding(
+      new_mesh, inp_sharding.spec, memory_kind=target_sharding.memory_kind,
+      _logical_device_ids=(None if permute_order is None else
+                            tuple(permute_order.tolist())))
+  new_x = array.make_array_from_single_device_arrays(x.shape, new_s, x._arrays)
   return api.jit(_identity_fn, out_shardings=target_sharding,
-                 donate_argnums=donate_argnums)(new_x)
+                donate_argnums=donate_argnums)(new_x)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -585,8 +571,14 @@ def _tpu_gpu_device_put_lowering(ctx, *xs, devices, srcs, copy_semantics):
     if (isinstance(device, (Sharding, TransferToMemoryKind)) and
         device.memory_kind is not None):
       if isinstance(device, Sharding):
-        x = mlir.wrap_with_sharding_op(
-            ctx, x, out_aval, device._to_xla_hlo_sharding(aval.ndim).to_proto())
+        if config.use_shardy_partitioner.value:
+          x = mlir.wrap_with_sharding_op(
+              ctx, x, out_aval,
+              device._to_sdy_sharding(aval.ndim))
+        else:
+          x = mlir.wrap_with_sharding_op(
+              ctx, x, out_aval,
+              device._to_xla_hlo_sharding(aval.ndim).to_proto())
       x = mlir.wrap_with_memory_kind(x, device.memory_kind, out_aval)
       return x
     return x

@@ -24,7 +24,6 @@ from absl.testing import parameterized
 import jax
 from jax import flatten_util
 from jax import tree_util
-from jax._src.lib import xla_extension_version
 from jax._src import test_util as jtu
 from jax._src.tree_util import flatten_one_level, prefix_errors
 import jax.numpy as jnp
@@ -485,10 +484,8 @@ class TreeTest(jtu.JaxTestCase):
           [([1], (2,), {"a": [1]})],
           re.escape("Custom node type mismatch"),
       ),
-      *(
-          []
-          if xla_extension_version < 288
-          else [(None, [2], re.escape("Expected None, got [2]."))]
+      (
+          (None, [2], re.escape("Expected None, got [2]."))
       ),
   )
   def testFlattenUpToErrors(self, tree, xs, error):
@@ -1146,6 +1143,37 @@ class TreePrefixErrorsTest(jtu.JaxTestCase):
     expected = ("pytree structure error: different numbers of pytree children "
                 "at key path\n"
                 "    in_axes")
+    with self.assertRaisesRegex(ValueError, expected):
+      raise e('in_axes')
+
+  def test_curly_braces_in_keys_no_children(self):
+    e, = prefix_errors({"{oops}": {}}, {})
+    expected = ("pytree structure error: different numbers of pytree children "
+                "at key path\n"
+                "    in_axes")
+    with self.assertRaisesRegex(ValueError, expected):
+      raise e('in_axes')
+
+  def test_curly_braces_in_keys_list_length(self):
+    e, = prefix_errors({"{oops}": []}, {"{oops}": [{}]})
+    expected = ("pytree structure error: different lengths of list "
+                "at key path\n"
+                r"    in_axes\['{oops}'\]")
+    with self.assertRaisesRegex(ValueError, expected):
+      raise e('in_axes')
+
+  def test_curly_braces_in_keys_different_lengths(self):
+    e, = prefix_errors({"{oops}": {}}, {"{oops}": 1})
+    expected = ("pytree structure error: different types at key path\n"
+                r"    in_axes\['{oops}'\]")
+    with self.assertRaisesRegex(ValueError, expected):
+      raise e('in_axes')
+
+  def test_curly_braces_in_keys_different_metadata(self):
+    e, = prefix_errors({"{oops}": {"{a}": 1}}, {"{oops}": {"{b}": 1}})
+    expected = ("pytree structure error: different pytree metadata "
+                "at key path\n"
+                r"    in_axes\['{oops}'\]")
     with self.assertRaisesRegex(ValueError, expected):
       raise e('in_axes')
 
