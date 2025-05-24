@@ -621,6 +621,32 @@ class ShardMapTest(jtu.JaxTestCase):
     x = f()
     self.assertAllClose(x, jnp.arange(4), check_dtypes=False)
 
+  def test_optimize_remat(self):
+    mesh = jtu.create_mesh((4,), 'x')
+
+    @jax.custom_vjp
+    def f(x):
+      return jnp.tan(x)
+
+    def f_fwd(x):
+      return jax.lax.psum(x, 'x'), (x,)
+
+    def f_bwd(res, g):
+      x, = res
+      cos_x = jnp.cos(x)
+      return (cos_x * g,)
+
+    f.defvjp(f_fwd, f_bwd, optimize_remat=True)
+
+    @jax.jit
+    @jax.shard_map(mesh=mesh, in_specs=P(), out_specs=P())
+    def temp(x):
+      out = jax.remat(f)(x)
+      out = out ** 2
+      return out
+
+    jax.grad(lambda x: temp(x).sum())(jnp.arange(4.))
+
   def test_remat_basic(self):
     # this tests remat-of-shmap
     mesh = Mesh(np.array(jax.devices()[:4]), ('x',))
@@ -736,10 +762,50 @@ class ShardMapTest(jtu.JaxTestCase):
     x = jnp.arange(4 * 4).reshape(4, 4)
     jaxpr = jax.make_jaxpr(jax.vmap(f, spmd_axis_name='y'))(x).jaxpr
     e, = jaxpr.eqns
-    self.assertIn('in_names', e.params)
-    self.assertEqual(e.params['in_names'], ({0: ('y',), 1: ('x',)},))
-    self.assertIn('out_names', e.params)
-    self.assertEqual(e.params['out_names'], ({0: ('y',), 1: ('x',)},))
+    self.assertIn('in_specs', e.params)
+    self.assertEqual(e.params['in_specs'], (P('y', 'x'),))
+    self.assertIn('out_specs', e.params)
+    self.assertEqual(e.params['out_specs'], (P('y', 'x'),))
+
+  def test_vmap_explicit_mesh_axis(self):
+    mesh = jtu.create_mesh(
+        (1, 2, 2), ('z', 'x', 'y'), axis_types=(AxisType.Explicit,) * 3)
+
+    @shard_map(mesh=mesh, in_specs=P('y'), out_specs=P('y'))
+    def f(x):
+      return x
+
+    x = jnp.arange(4 * 4).reshape(4, 4)
+    s = NamedSharding(mesh, P(('z', 'x'), 'y'))
+    x = jax.device_put(x, s)
+
+    f = jax.jit(jax.vmap(f))
+    out = f(x)
+    self.assertEqual(out.sharding, s)
+
+  def test_vmap_explicit_mesh_axis_error(self):
+    mesh = jtu.create_mesh((2, 2), ('x', 'y'),
+                           axis_types=(AxisType.Explicit,) * 2)
+
+    @shard_map(mesh=mesh, in_specs=P('x'), out_specs=P('x'))
+    def f(x):
+      return x
+
+    x = jnp.arange(4 * 4).reshape(4, 4)
+    s = NamedSharding(mesh, P('x', 'y'))
+    x = jax.device_put(x, s)
+
+    f = jax.jit(jax.vmap(f))
+    with self.assertRaisesRegex(
+        ValueError, "vmapped away explicit mesh axis cannot appear"):
+      f(x)
+
+    f = jax.jit(jax.vmap(f, spmd_axis_name='y'))
+    with self.assertRaisesRegex(
+        ValueError,
+        'Only one of spmd_axis_name or arrays sharded on `Explicit` mesh axis'
+        ' type is allowed'):
+      f(x)
 
   def test_vmap_of_grad_spmd_axis_name(self):
     mesh = jtu.create_mesh((2, 2), ('x', 'y'))
@@ -771,10 +837,10 @@ class ShardMapTest(jtu.JaxTestCase):
     x = jnp.arange(4 * 4).reshape(4, 4)
     jaxpr = jax.make_jaxpr(jax.vmap(f, spmd_axis_name=('x', 'y')))(x).jaxpr
     e, = jaxpr.eqns
-    self.assertIn('in_names', e.params)
-    self.assertEqual(e.params['in_names'], ({0: ('x', 'y',)},))
-    self.assertIn('out_names', e.params)
-    self.assertEqual(e.params['out_names'], ({0: ('x', 'y',)},))
+    self.assertIn('in_specs', e.params)
+    self.assertEqual(e.params['in_specs'][0], P(('x', 'y')))
+    self.assertIn('out_specs', e.params)
+    self.assertEqual(e.params['out_specs'][0], P(('x', 'y')))
 
   def test_nested_vmap_with_capture_spmd_axis_name(self):
     self.skipTest('https://github.com/jax-ml/jax/issues/23476')
@@ -922,6 +988,22 @@ class ShardMapTest(jtu.JaxTestCase):
       jax.effects_barrier()
     for i in range(len(jax.devices())):
       self.assertIn(f'instance {i} has value', output())
+
+  def test_psum_transpose_non_zero_cts(self):
+    mesh = jtu.create_mesh((8,), 'x')
+    @shard_map(mesh=mesh, in_specs=P('x'), out_specs=(P('x'), P()))
+    def f1(x_block):
+      return x_block, jax.lax.psum(x_block, axis_name='x')
+
+    x1 = jnp.arange(16.)
+    f1(x1)  # doesn't crash
+
+    def f2(x_block):
+      y, _ = f1(x_block)
+      return y.sum()
+
+    jax.jit(jax.grad(f2))(x1)  # doesn't crash
+    jax.grad(f2)(x1)  # doesn't crash
 
   @jtu.run_on_devices('cpu', 'gpu', 'tpu')
   @jtu.thread_unsafe_test()
