@@ -40,7 +40,6 @@ from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import xla
 from jax._src.interpreters.batching import not_mapped
-from jax._src.lax import lax
 from jax._src.tree_util import (
     tree_flatten, tree_unflatten, tree_map, treedef_is_leaf, treedef_tuple,
     register_pytree_node_class, tree_leaves, tree_flatten_with_path,
@@ -409,8 +408,6 @@ def lift_jvp(num_consts: int, jvp_jaxpr_fun: lu.WrappedFun) -> lu.WrappedFun:
     assert next(nz_out_tangents_, None) is None
     return [*out_primals, *out_tangents]
   return lu.wrap_init(jvp, debug_info=jvp_jaxpr_fun.debug_info)
-
-effects.custom_derivatives_allowed_effects.add_type(lax.InOutFeedEffect)
 
 custom_jvp_call_p = CustomJVPCallPrimitive('custom_jvp_call')
 
@@ -1619,21 +1616,19 @@ def optimize_remat_of_custom_vjp_fwd(
     prim_tree, res_tree = out_trees()
     num_res = res_tree.num_leaves
 
-    if fwd_jaxpr.effects:
+    disallowed_effects = effects.custom_derivatives_allowed_effects.filter_not_in(fwd_jaxpr.effects)
+    if disallowed_effects:
       raise NotImplementedError(
           "remat optimization for custom_vjp does not support forward "
-          f"functions with side effects, but {fwd_name} has the following "
-          f"effects: {fwd_jaxpr.effects}")
+          f"functions with these side effects: {disallowed_effects}")
 
     @pe._memoize
     def fun_jaxpr_thunk():
       jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
       return jaxpr, consts
 
-    out_flat = remat_opt_p.bind(*consts, *args_flat,
-                                num_consts=len(consts),
-                                num_res=num_res,
-                                fwd_jaxpr=fwd_jaxpr,
+    out_flat = remat_opt_p.bind(*consts, *args_flat, num_consts=len(consts),
+                                num_res=num_res, fwd_jaxpr=fwd_jaxpr,
                                 fun_jaxpr_thunk=fun_jaxpr_thunk)
     res, out_flat = split_list(out_flat, [num_res])
     out_tree = treedef_tuple((prim_tree, res_tree))

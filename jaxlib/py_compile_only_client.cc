@@ -82,21 +82,12 @@ class CompileOnlyPyClient : public PyClient {
     mlir::MLIRContext context;
     TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
                         ParseMlirModuleString(mlir_module, context));
-    if (options.executable_build_options.use_shardy_partitioner()) {
-      // Since Shardy is located in the middle of the XLA pipeline, we need to
-      // export it before going to HLO while preserving Shardy ops and attrs.
-      TF_RETURN_IF_ERROR(ExportShardyForHloRoundTrip(*module));
-    }
     auto* ifrt_client =
         llvm::dyn_cast_or_null<CompileOnlyIfRtClient>(this->ifrt_client());
     CHECK(ifrt_client) << "CompileOnlyPyClient requires ifrt_client be a "
                           "CompileOnlyIfRtClient";
-#if JAX_IFRT_VERSION_NUMBER >= 6
     auto xla_options = std::make_unique<ifrt::XlaCompileOptions>(
         options, std::move(executable_devices));
-#else
-    auto xla_options = std::make_unique<ifrt::XlaCompileOptions>(options);
-#endif
     TF_ASSIGN_OR_RETURN(auto executable,
                         PjRtCompile(std::move(options), module.get(),
                                     *ifrt_client->topology().description()));

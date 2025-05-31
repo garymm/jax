@@ -49,6 +49,7 @@ jax_multiplatform_test(
     srcs = ["custom_api_test.py"],
     shard_count = 10,
     deps = [
+        "//jax:custom_derivatives",
         "//jax:experimental",
     ] + py_deps([
         "absl/testing",
@@ -61,6 +62,7 @@ jax_multiplatform_test(
     srcs = ["debug_info_test.py"],
     enable_configs = ["tpu_v3_x4"],
     deps = [
+        "//jax:custom_transpose",
         "//jax:experimental",
         "//jax:pallas",
         "//jax:pallas_gpu",
@@ -121,6 +123,10 @@ jax_py_test(
 jax_multiplatform_test(
     name = "array_interoperability_test",
     srcs = ["array_interoperability_test.py"],
+    disable_configs = [
+        "gpu_h100_tfrt",  # TODO(b/411472145): Re-enable once fixed.
+        "gpu_h100x2_tfrt",
+    ],
     enable_backends = [
         "cpu",
         "gpu",
@@ -128,7 +134,9 @@ jax_multiplatform_test(
     enable_configs = [
         "gpu_h100x2",
     ],
-    tags = ["multiaccelerator"],
+    tags = [
+        "multiaccelerator",
+    ],
     deps = py_deps([
         "absl/testing",
         "numpy",
@@ -454,6 +462,9 @@ jax_multiplatform_test(
     backend_tags = {
         "gpu": ["noasan"],  # Memory leaks in NCCL, see https://github.com/NVIDIA/nccl/pull/1143
     },
+    disable_configs = [
+        "gpu_h100x2_tfrt",  # TODO(b/419192167): Doesn't work
+    ],
     enable_backends = ["gpu"],
     tags = [
         "config-cuda-only",
@@ -1134,6 +1145,10 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "pytorch_interoperability_test",
     srcs = ["pytorch_interoperability_test.py"],
+    disable_configs = [
+        "gpu_h100_tfrt",  # TODO(b/411472145): Re-enable once fixed.
+        "gpu_h100x2_tfrt",
+    ],
     enable_backends = [
         "cpu",
         "gpu",
@@ -1834,6 +1849,9 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "shard_map_test",
     srcs = ["shard_map_test.py"],
+    disable_configs = [
+        "gpu_h100x2_tfrt",  # TODO(b/419192167): Doesn't work
+    ],
     enable_configs = [
         "gpu_p100x2_shardy",
         "tpu_v3_x4_shardy",
@@ -2092,6 +2110,7 @@ jax_py_test(
     srcs = ["sourcemap_test.py"],
     deps = [
         "//jax",
+        "//jax:sourcemap",
         "//jax:test_util",
     ] + py_deps([
         "absl/testing",

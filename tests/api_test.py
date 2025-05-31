@@ -61,7 +61,6 @@ from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.compilation_cache import is_persistent_cache_enabled
 from jax._src.lib import _jax
-from jax._src.lib import jaxlib_extension_version
 import jax._src.util as jax_util
 from jax.ad_checkpoint import checkpoint_name, checkpoint as new_checkpoint
 from jax.errors import (UnexpectedTracerError, TracerIntegerConversionError,
@@ -1975,11 +1974,6 @@ class APITest(jtu.JaxTestCase):
       jax.device_put((x, y, z), device=(s1, s2))
 
   def test_internal_device_put_with_device(self):
-    if jaxlib_extension_version < 341:
-      raise unittest.SkipTest(
-          "Test requires jaxlib extension version >= 341 for tracking low-level"
-          " DevicePut calls")
-
     # Hitting the cache for a single-device jitted execution while using a numpy
     # array calls internal `DevicePutWithDevice`.
     f = jax.jit(lambda x: x + 1)
@@ -1990,10 +1984,6 @@ class APITest(jtu.JaxTestCase):
     self.assertEqual(counts(), {"device_put_with_device": 1})
 
   def test_internal_device_put_fully_replicated(self):
-    if jaxlib_extension_version < 341:
-      raise unittest.SkipTest(
-          "Test requires jaxlib extension version >= 341 for tracking low-level"
-          " DevicePut calls")
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices")
 
@@ -2011,10 +2001,6 @@ class APITest(jtu.JaxTestCase):
     )
 
   def test_internal_device_put_batched(self):
-    if jaxlib_extension_version < 341:
-      raise unittest.SkipTest(
-          "Test requires jaxlib extension version >= 341 for tracking low-level"
-          " DevicePut calls")
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices")
 
@@ -2031,10 +2017,6 @@ class APITest(jtu.JaxTestCase):
     )
 
   def test_internal_device_put_assembled(self):
-    if jaxlib_extension_version < 341:
-      raise unittest.SkipTest(
-          "Test requires jaxlib extension version >= 341 for tracking low-level"
-          " DevicePut calls")
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices")
 
@@ -4525,13 +4507,6 @@ class APITest(jtu.JaxTestCase):
     with self.assertRaisesRegex(TypeError, "applied to foo"):
       f_vjp(1.0, 1.0)
 
-  def test_shapedtypestruct_sharding_error(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        "sharding should be an instance of `jax.sharding.Sharding`."):
-      jax.ShapeDtypeStruct((8, 2), np.float32,
-                           sharding=jax.sharding.PartitionSpec('x'))
-
   def test_make_jaxpr_weakref(self):
     class Foo(NamedTuple):
       x: int
@@ -5082,6 +5057,29 @@ class APITest(jtu.JaxTestCase):
     # https://github.com/jax-ml/jax/issues/25847
     with jax.ensure_compile_time_eval():
       jnp.linalg.solve(jnp.eye(3), jnp.ones(3))  # doesn't crash
+
+  def test_returned_non_jaxtype(self):
+
+    class TestEnum(enum.Enum):
+      A = enum.auto()
+
+    @jax.tree_util.register_dataclass
+    @dataclasses.dataclass
+    class TestClass3:
+      test_enum_field: TestEnum = dataclasses.field(metadata=dict(static=True))
+      test_data_field: int
+
+    def test_jax_function(test_class: TestClass3) -> TestEnum:
+      return test_class.test_enum_field
+
+    jitted_test_function = jax.jit(test_jax_function)
+    with self.assertRaisesRegex(TypeError, "returned a value of type"):
+        jitted_test_function(
+            TestClass3(
+                test_data_field=1,
+                test_enum_field=TestEnum.A,
+            )
+        )
 
 
 class RematTest(jtu.JaxTestCase):

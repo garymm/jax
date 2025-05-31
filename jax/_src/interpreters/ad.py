@@ -21,12 +21,12 @@ import itertools as it
 from functools import partial
 from typing import Any
 
+from jax._src import api_util
 from jax._src import config
-from jax._src import dispatch
 from jax._src import linear_util as lu
 from jax._src.interpreters import partial_eval as pe
-from jax.tree_util import (tree_flatten, tree_unflatten,
-                           register_pytree_node, Partial, PyTreeDef)
+from jax._src.tree_util import (tree_flatten, tree_unflatten,
+                                register_pytree_node, Partial, PyTreeDef)
 from jax._src import mesh as mesh_lib
 from jax._src import core
 from jax._src import source_info_util
@@ -641,6 +641,9 @@ class JVPTracer(Tracer):
   def get_referent(self):
     return core.get_referent(self.primal)
 
+  def type_state(self):
+    return self.primal.type_state()
+
 def _primal_tangent_shapes_match(primal, tangent):
   if type(tangent) is not Zero:
     primal_aval = get_aval(primal).strip_weak_type()
@@ -885,7 +888,7 @@ def linearize_from_jvp(jvp: lu.WrappedFun,
     out_nz_tracers = [trace.to_jaxpr_tracer(r)
                       for (r, nz) in zip(out_tangents, out_nzs) if nz]
     in_tracers = [t for t, nz in zip(tangent_args, nonzeros) if nz]
-    jaxpr, out_consts, _ = pe.tracers_to_jaxpr(in_tracers, out_nz_tracers, jvp.debug_info)
+    jaxpr, out_consts, _ = pe.tracers_to_jaxpr(in_tracers, out_nz_tracers, [], jvp.debug_info)
     jaxpr, used_consts, _ = pe.dce_jaxpr_consts(
         jaxpr, [True] * len(jaxpr.outvars),
         [False] * len(jaxpr.constvars) + [True] * len(jaxpr.invars))
@@ -1125,7 +1128,7 @@ def map_transpose(primitive: core.Primitive, params,
 
   try:
     out_flat = primitive.bind(fun, *all_args, **new_params)
-  except dispatch.InternalFloatingPointError as e:
+  except api_util.InternalFloatingPointError as e:
     print("Invalid nan value encountered in the backward pass of a jax.jit "
           "function. Calling the de-optimized backward pass.")
     try:
@@ -1135,7 +1138,7 @@ def map_transpose(primitive: core.Primitive, params,
     else:
       # If control reaches this line, we got a NaN on the output of `compiled`
       # but not `fun.call_wrapped` on the same arguments. Let's tell the user.
-      dispatch._raise_no_nan_in_deoptimized(e)
+      api_util._raise_no_nan_in_deoptimized(e)
   arg_cts = tree_unflatten(out_tree(), out_flat)
 
   # The freevars are being fanned out (not mapped). During transpose the
@@ -1166,8 +1169,9 @@ def _jvp_jaxpr(jaxpr: core.ClosedJaxpr,
                    debug_info=jaxpr.jaxpr.debug_info)
   f_jvp, out_nonzeros = f_jvp_traceable(
       jvp(f, instantiate=instantiate, transform_stack=False), nonzeros)
-  tangent_avals = [aval.to_tangent_aval() for aval, nz in zip(jaxpr.in_avals, nonzeros) if nz]
-  avals_in = list(it.chain(jaxpr.in_avals, tangent_avals))
+  tangent_avals = [aval.to_tangent_aval()
+                   for aval, nz in zip(jaxpr.in_avals_aug, nonzeros) if nz]
+  avals_in = list(it.chain(jaxpr.in_avals_aug, tangent_avals))
   jaxpr_out, avals_out, literals_out, () = pe.trace_to_jaxpr_dynamic(
       f_jvp, avals_in)
   return core.ClosedJaxpr(jaxpr_out, literals_out), out_nonzeros()
@@ -1189,14 +1193,12 @@ def rearrange_binders(jaxpr: core.ClosedJaxpr, primals_in, tangents_in, primals_
   new_invars = _perm(primals_in, tangents_in, jaxpr.jaxpr.invars)
   new_outvars = _perm(primals_out, tangents_out, jaxpr.jaxpr.outvars)
   new_debug_info = jaxpr.jaxpr.debug_info
-  new_arg_names = tuple(_perm(primals_in, tangents_in,
-                              jaxpr.jaxpr.debug_info.safe_arg_names(len(jaxpr.jaxpr.invars))))
-  new_result_paths = tuple(_perm(primals_out, tangents_out,
-                                  jaxpr.jaxpr.debug_info.safe_result_paths(len(jaxpr.jaxpr.outvars))))
+  arg_names = jaxpr.jaxpr.debug_info.safe_arg_names(len(jaxpr.in_avals))
+  result_paths = jaxpr.jaxpr.debug_info.safe_result_paths(len(jaxpr.out_avals))
+  new_arg_names = tuple(_perm(primals_in, tangents_in, arg_names))
+  new_result_paths = tuple(_perm(primals_out, tangents_out, result_paths))
   new_debug_info = new_debug_info._replace(
-      arg_names=new_arg_names,
-      result_paths=new_result_paths,
-  )
+      arg_names=new_arg_names, result_paths=new_result_paths)
   constvars = jaxpr.jaxpr.constvars
   new_effects = pe._renumber_effects(
       (*constvars, *new_invars), (*constvars, *jaxpr.jaxpr.invars),
@@ -1266,11 +1268,3 @@ class CustomVJPException(Exception):
 
 # TODO(mattjj): remove this vestigial dict
 reducing_transposes: dict[core.Primitive, Callable] = {}
-
-########################### pvary ##################################
-
-def _pvary_transpose_rule(cts, *_, axes, axis_index_groups):
-  from jax._src.lax import parallel as lax_parallel
-  return lax_parallel.psum_invariant_p.bind(
-      *cts, axes=axes, axis_index_groups=axis_index_groups)
-deflinear2(core.pvary_p, _pvary_transpose_rule)

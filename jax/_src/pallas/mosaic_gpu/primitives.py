@@ -37,6 +37,7 @@ from jax._src.lib.mlir.dialects import memref as memref_dialect
 from jax._src.lib.mlir.dialects import gpu as gpu_dialect
 from jax._src.lib.mlir.dialects import nvvm as nvvm_dialect
 from jax._src.pallas import core as pallas_core
+from jax._src.pallas import primitives as pallas_primitives
 from jax._src.pallas.mosaic_gpu import core as gpu_core
 from jax._src.pallas.mosaic_gpu import lowering
 from jax._src.pallas.mosaic_gpu.core import state_types
@@ -49,6 +50,7 @@ from jax.experimental.mosaic.gpu import tcgen05
 import jax.numpy as jnp
 
 
+WARP_SIZE = 32
 WARPGROUP_SIZE = 128
 
 
@@ -56,7 +58,7 @@ _Ref = pallas_core.AbstractMemoryRef | state_types.TransformedRef
 
 
 def _check_ref(
-    aval: object, name: str, memory_space: gpu_core.GPUMemorySpace
+    aval: object, name: str, memory_space: gpu_core.MemorySpace
 ) -> None:
   if not isinstance(aval, state_types.AbstractRef):
     raise TypeError(f"{name} must be a reference, got {aval}")
@@ -281,6 +283,10 @@ def _copy_smem_to_gmem_lowering(
   else:
     indices, slice_lengths = _split_gmem_slice(copy_params["gmem_slice"])
   assert copy_params.get("swizzle") is None
+  if copy_params.get("gmem_peer_id", None) is not None:
+    raise NotImplementedError(
+        "GMEM refs with peer ids are not supported in warpgroup lowering."
+    )
   assert not copy_params.get("gmem_transform")
   mgpu.dialect.async_store(
       src,
@@ -316,13 +322,25 @@ def _split_gmem_slice(gmem_slice):
 def _extract_gmem_copy_params(transforms):
   if not transforms:
     return {}
+  peer_id = None
+  indexers = []
   for transform in transforms:
-    if not isinstance(transform, indexing.NDIndexer):
+    if isinstance(transform, gpu_core.PeerMemRef):
+      if transform.device_id_type != pallas_primitives.DeviceIdType.LOGICAL:
+        raise NotImplementedError(
+            "Only logical device ids are supported for GMEM refs."
+        )
+      peer_id = lowering._ensure_ir_value(transform.device_id, jnp.int32)
+      continue
+    elif isinstance(transform, indexing.NDIndexer):
+      indexers.append(transform)
+    else:
       raise NotImplementedError(
           "Non-indexing transforms on GMEM refs are not implemented.")
-  indexer = lowering.merge_indexers(transforms)
+  indexer = lowering.merge_indexers(indexers)
   return dict(
       gmem_slice=lowering._ndindexer_indices(indexer),
+      gmem_peer_id=peer_id,
   )
 
 
@@ -464,7 +482,7 @@ def _copy_gmem_to_smem_lowering(
     dst_transforms_treedef,
     barrier_transforms_treedef,
     collective_axes,
-    warpgroup_sync: bool = True,
+    for_warpgroup: bool = True,
 ):
   flat_src_transforms, flat_dst_transforms, flat_barrier_transforms = (
       util.split_list(
@@ -505,15 +523,24 @@ def _copy_gmem_to_smem_lowering(
   if ctx.module_ctx.lowering_semantics == mgpu.LoweringSemantics.Lane:
     if bytes % WARPGROUP_SIZE:
       raise NotImplementedError("Only aligned copies are supported")
-    # We arrive uniformly from each thread in the WG, so we need to divide the
-    # number of bytes by the number of threads in the WG.
-    # TODO: apaszke - Relax this. We can just select the WG leader and have it
-    # arrive with the whole transfer size, while everyone else arrives with 0.
-    # But we should continue using this scheme as it's likely to be faster.
-    bytes //= WARPGROUP_SIZE
-    if warpgroup_sync:
-      mgpu.warpgroup_barrier()  # Make sure all reads have completed.
-    barrier.arrive_expect_tx(bytes)
+    if for_warpgroup:
+      # We arrive uniformly from each thread in the WG, so we need to divide the
+      # number of bytes by the number of threads in the WG.
+      # TODO: apaszke - Relax this. We can just select the WG leader and have it
+      # arrive with the whole transfer size, while everyone else arrives with 0.
+      # But we should continue using this scheme as it's likely to be faster.
+      bytes //= WARPGROUP_SIZE
+      if ctx.module_ctx.auto_barriers:
+        mgpu.warpgroup_barrier()  # Make sure all reads have completed.
+      barrier.arrive_expect_tx(bytes)
+    else:
+      # In Warp-level lowering, we arrive on each CUDA thread in a warp, but
+      # the barrier still expects a full 128 arrivals so we arrive 4 times
+      # on each CUDA thread instead.
+      bytes //= WARP_SIZE
+      barrier.arrive(arrival_count=3, can_complete=False)
+      barrier.arrive_expect_tx(bytes)
+
     ctx.launch_ctx.async_copy(
         src_ref=src,
         dst_ref=dst,
@@ -533,6 +560,10 @@ def _copy_gmem_to_smem_lowering(
     indices, slice_lengths = _split_gmem_slice(copy_params["gmem_slice"])
   assert copy_params.get("swizzle") is None
   assert not copy_params.get("gmem_transform")
+  if copy_params.get("gmem_peer_id", None) is not None:
+    raise NotImplementedError(
+        "GMEM refs with peer ids are not supported in warpgroup lowering."
+    )
   barrier_ref = barrier.as_barrier_memref()
   mgpu.dialect.arrive_expect_tx(barrier_ref, bytes)
   mgpu.dialect.async_load(
@@ -545,11 +576,12 @@ def _copy_gmem_to_smem_lowering(
   )
   return ()
 
+
 lowering.register_lowering_rule(
     copy_gmem_to_smem_p,
     mgpu.LoweringSemantics.Lane,
     primitive_semantics=gpu_core.PrimitiveSemantics.Warp,
-)(functools.partial(_copy_gmem_to_smem_lowering, warpgroup_sync=False))
+)(functools.partial(_copy_gmem_to_smem_lowering, for_warpgroup=False))
 
 
 def copy_gmem_to_smem(
@@ -713,7 +745,14 @@ jax_core.pp_eqn_rules[barrier_wait_p] = _barrier_wait_pp_eqn
 
 
 @lowering.register_lowering_rule(barrier_wait_p, mgpu.LoweringSemantics.Lane)
-@lowering.register_lowering_rule(barrier_wait_p, mgpu.LoweringSemantics.Warpgroup)
+@lowering.register_lowering_rule(
+    barrier_wait_p,
+    mgpu.LoweringSemantics.Lane,
+    gpu_core.PrimitiveSemantics.Warp,
+)
+@lowering.register_lowering_rule(
+    barrier_wait_p, mgpu.LoweringSemantics.Warpgroup
+)
 def _barrier_wait_lowering(
     ctx: lowering.LoweringRuleContext,
     barrier,
@@ -1187,32 +1226,44 @@ def tcgen05_mma(acc: _Ref,
   else:
     b_transforms_leaves, b_transforms_tree = [], None
 
+  if isinstance(barrier, pallas_core.TransformedRef):
+    barrier_transforms_leaves, barrier_transforms_tree = jax.tree.flatten(
+        barrier.transforms
+    )
+    barrier = barrier.ref
+  else:
+    barrier_transforms_leaves, barrier_transforms_tree = [], None
+
   tcgen05_mma_p.bind(acc, a, b, barrier, accumulate,
                       *a_transforms_leaves, *b_transforms_leaves,
+                      *barrier_transforms_leaves,
                       a_transforms_tree=a_transforms_tree,
                       b_transforms_tree=b_transforms_tree,
+                      barrier_transforms_tree=barrier_transforms_tree,
                       collective_axis=collective_axis)
+
 
 @tcgen05_mma_p.def_abstract_eval
 def _tcgen05_mma_abstract_eval(acc, a, b, barrier, accumulate,
                                *transforms_leaves,
                                a_transforms_tree, b_transforms_tree,
+                               barrier_transforms_tree,
                                collective_axis):
-  del (accumulate, transforms_leaves, a_transforms_tree, b_transforms_tree)
+  del (accumulate, transforms_leaves, a_transforms_tree, b_transforms_tree,
+       barrier_transforms_tree)
 
-  if acc.memory_space != gpu_core.GPUMemorySpace.TMEM:
+  if acc.memory_space != gpu_core.TMEM:
     raise ValueError("Accumulator must be a TMEM Ref.")
-  if a.memory_space not in (gpu_core.GPUMemorySpace.SMEM,
-                            gpu_core.GPUMemorySpace.TMEM):
+  if a.memory_space not in (gpu_core.SMEM, gpu_core.TMEM):
     raise ValueError("LHS must be a TMEM/SMEM Ref.")
-  if b.memory_space != gpu_core.GPUMemorySpace.SMEM:
+  if b.memory_space != gpu_core.SMEM:
     raise ValueError("RHS must be an SMEM Ref.")
 
   if collective_axis is not None:
     if not acc.collective:
       raise ValueError(
           "Accumulator Ref must be collective if collective_axis is set.")
-    if a.memory_space == gpu_core.GPUMemorySpace.TMEM and not a.collective:
+    if a.memory_space == gpu_core.TMEM and not a.collective:
       raise ValueError(
           "LHS TMEM Ref must be collective if collective_axis is set.")
 
@@ -1222,6 +1273,7 @@ def _tcgen05_mma_abstract_eval(acc, a, b, barrier, accumulate,
     raise ValueError("MMA barrier must have for_tensor_core set to True.")
 
   return []
+
 
 @lowering.register_lowering_rule(tcgen05_mma_p, *gpu_core.LANExWG_SEMANTICS)
 @lowering.register_lowering_rule(tcgen05_mma_p, *gpu_core.LANExWARP_SEMANTICS)
@@ -1235,16 +1287,26 @@ def _tcgen05_mma_lowering(
     *transforms_leaves,
     a_transforms_tree,
     b_transforms_tree,
+    barrier_transforms_tree,
     collective_axis,
 ):
   _, a_aval, b_aval, *_ = ctx.avals_in
   lhs_swizzle: int | None = None
   lhs_transpose: bool = False
-  if a_transforms_tree is not None:
-    a_transforms_leaves, b_transforms_leaves = util.split_list(
-        transforms_leaves, [a_transforms_tree.num_leaves]
-    )
 
+  transforms_trees = (
+      a_transforms_tree,
+      b_transforms_tree,
+      barrier_transforms_tree,
+  )
+  (a_transforms_leaves, b_transforms_leaves, barrier_transforms_leaves, _) = (
+      util.split_list(
+          transforms_leaves,
+          [getattr(tree, "num_leaves", 0) for tree in transforms_trees],
+      )
+  )
+
+  if a_transforms_tree is not None:
     a_transforms = a_transforms_tree.unflatten(a_transforms_leaves)
     a_ref, a_transforms = lowering._handle_transforms(
         ctx, a_ref, a_transforms, handle_transposes=False, handle_reshapes=True
@@ -1266,9 +1328,8 @@ def _tcgen05_mma_lowering(
     if lhs_tiling != (8, swizzle_elems):
       raise ValueError("MMA lhs tiling does not fit swizzle. "
                        f"{lhs_tiling=} expected={(8, swizzle_elems)}")
-  else:
-    b_transforms_leaves = transforms_leaves  # type: ignore
 
+  assert b_transforms_tree is not None
   b_transforms = b_transforms_tree.unflatten(b_transforms_leaves)
   b_ref, b_transforms = lowering._handle_transforms(
       ctx, b_ref, b_transforms, handle_transposes=False, handle_reshapes=True
@@ -1286,16 +1347,28 @@ def _tcgen05_mma_lowering(
       raise NotImplementedError(
           f"Unsupported transforms: {b_transforms}."
       )
-
   swizzle_elems = rhs_swizzle // b_aval.dtype.itemsize
+  if rhs_tiling != (8, swizzle_elems):
+    raise ValueError(
+        "MMA rhs tiling does not fit swizzle"
+        f" {rhs_tiling=} expected={(8, swizzle_elems)}"
+    )
+
+  if barrier_transforms_tree is not None:
+    barrier_transforms = barrier_transforms_tree.unflatten(
+        barrier_transforms_leaves
+    )
+    indexer = _extract_barrier_indexer(barrier_transforms)
+    if indexer is not None:
+      barrier_ref = barrier_ref.__getitem__(
+          *map(lowering._as_index, indexer.indices)
+      )
+
   if lhs_swizzle is None:
     lhs_swizzle = rhs_swizzle
   elif rhs_swizzle != lhs_swizzle:
     raise ValueError("MMA rhs swizzle must match lhs swizzle."
                       f" {lhs_swizzle=} {rhs_swizzle=}")
-  if rhs_tiling != (8, swizzle_elems):
-    raise ValueError("MMA rhs tiling does not fit swizzle"
-                      f" {rhs_tiling=} expected={(8, swizzle_elems)}")
   if lhs_transpose:
     if isinstance(a_ref, tcgen05.TMEMRef):
       raise ValueError("TMEM transpose not allowed.")
@@ -1304,6 +1377,9 @@ def _tcgen05_mma_lowering(
     b_ref = mgpu.memref_transpose(b_ref, (1, 0, 3, 2))
   if isinstance(accumulate, bool):
     accumulate = mgpu.c(accumulate, ir.IntegerType.get_signless(1))
+  elif isinstance(accumulate, mgpu.FragmentedArray):
+    accumulate = accumulate.registers.item()
+    assert isinstance(accumulate, ir.Value)
 
   predicate = ctx.module_ctx.single_lane_predicate
   collective = False
@@ -1331,8 +1407,8 @@ def _tcgen05_mma_lowering(
               acc,
               a_ref,
               b_ref,
-              a_swizzle=lhs_swizzle,
-              b_swizzle=rhs_swizzle,
+              a_swizzle=int(lhs_swizzle),
+              b_swizzle=int(rhs_swizzle),
               accumulate=accumulate,
               collective=collective,
           )

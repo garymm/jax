@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from functools import partial
 import inspect
-import itertools
+import itertools as it
 import operator
 from typing import Any, TypeVar
 import weakref
@@ -341,7 +341,7 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
   # If the body forwards an input carry to an output carry, that input is
   # read-only and can be moved to be a const. Doing so can lead to efficiency
   # wins, e.g. if the scan is inside a cond with a batched predicate.
-  carry_fwd, _ = split_list(pe._jaxpr_forwarding(jaxpr.jaxpr), [num_carry])
+  carry_fwd, ext_fwd = split_list(pe._jaxpr_forwarding(jaxpr.jaxpr), [num_carry])
   move_to_const = [len(consts) + i == f for i, f in enumerate(carry_fwd)]
   if any(move_to_const):
     jaxpr = pe.prune_closed_jaxpr_outputs(
@@ -352,11 +352,31 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
     consts = [*new_consts, *consts]
     num_carry -= len(new_consts)
 
+  # When an extensive output is forwarded from an extensive input, we can
+  # avoid copying it by pruning it from the jaxpr and forwarding manually. We
+  # don't need to update the indexing based on the optimization above since it
+  # doesn't change the total number of consts and carries combined, and
+  # `ext_fwd` already only includes the extensive outputs. But, we do remove
+  # the number of consts from the index since we're going to use it to index
+  # into `in_flat`, which doesn't include consts.
+  ext_to_ext_fwd = [
+      in_idx - len(consts) if in_idx is not None and
+      in_idx >= num_carry + len(consts) else None for in_idx in ext_fwd]
+  jaxpr = pe.prune_closed_jaxpr_outputs(
+      jaxpr, [True] * num_carry + [i is None for i in ext_to_ext_fwd])
+
   out = scan_p.bind(*consts, *in_flat,
                     reverse=reverse, length=length, jaxpr=jaxpr,
                     num_consts=len(consts), num_carry=num_carry,
                     linear=(False,) * (len(consts) + len(in_flat)),
                     unroll=unroll, _split_transpose=_split_transpose)
+
+  # Apply input to output forwarding that was computed above.
+  carry_out, out = split_list(out, [num_carry])
+  out_ = iter(out)
+  out = [next(out_) if f is None else _maybe_put(in_flat[f]) for f in ext_to_ext_fwd]
+  assert next(out_, None) is None
+  out = [*carry_out, *out]
 
   if any(move_to_const):
     out = pe.merge_lists(move_to_const + [False] * num_ys, out, new_consts)
@@ -418,11 +438,11 @@ def _merge_attrs_out(attrs_tracked, out_state, out_append):
   out_attrs = []
   for _, out_tree, (_, _, k) in attrs_tracked:
     if k in (pe.ReadWrite, pe.BoxAttr):
-      out_attrs.extend(itertools.islice(out_state_, out_tree.num_leaves))
+      out_attrs.extend(it.islice(out_state_, out_tree.num_leaves))
     elif k is pe.Append:
       out_attrs.append(next(out_append_))
     elif k is pe.ListAttr:
-      out_attrs.extend(itertools.islice(out_append_, out_tree.num_leaves))
+      out_attrs.extend(it.islice(out_append_, out_tree.num_leaves))
     else:
       assert False
   assert next(out_state_, None) is next(out_append_, None) is None
@@ -911,7 +931,7 @@ def _scan_partial_eval(trace, *tracers, reverse: bool,
   ys_avals = [core.unmapped_aval(length, 0, y_aval)
               for y_aval in y_avals]
   out_tracers = [pe.JaxprTracer(trace, pe.PartialVal.unknown(a), None)
-                 for a in itertools.chain(carry_avals, ys_avals)]
+                 for a in it.chain(carry_avals, ys_avals)]
   del carry_avals, y_avals
   # Create equation.
   linear_unknown = tuple([False] * len(intensive_res) +
@@ -920,7 +940,7 @@ def _scan_partial_eval(trace, *tracers, reverse: bool,
   name_stack = source_info_util.current_name_stack()[len(trace.name_stack):]
   source = source_info_util.current().replace(name_stack=name_stack)
   assert len(out_tracers) == len(jaxpr_unknown.out_avals)
-  eqn = pe.new_eqn_recipe([*intensive_res, *unknown_inputs, *extensive_res],
+  eqn = pe.new_eqn_recipe(trace, [*intensive_res, *unknown_inputs, *extensive_res],
                           out_tracers, scan_p,
                           dict(reverse=reverse, length=length, unroll=unroll,
                                jaxpr=jaxpr_unknown, linear=linear_unknown,
@@ -1480,6 +1500,17 @@ def _scan_state_partial_discharge_rule(should_discharge, in_avals, out_avals, *a
   assert len(refs_out_matching_in_avals) == len(in_avals)
   return refs_out_matching_in_avals, [*carry_out, *ys]
 
+def _scan_staging(trace, *args, **params):
+  outs = trace.default_process_primitive(scan_p, args, params)
+  jaxpr = params['jaxpr']
+  trace.frame.is_high = jaxpr.jaxpr.is_high
+  invars = [trace.frame.tracer_to_var[id(t)] for t in args]
+  var_map = dict(zip(jaxpr.jaxpr.invars, invars))
+  final_env = {var_map[v]: ty for v, ty in
+               jaxpr.jaxpr.final_typechange_env.items()}
+  trace.frame.current_typechange_env.update(final_env)
+  return outs
+
 scan_p = core.Primitive("scan")
 scan_p.multiple_results = True
 scan_p.skip_canonicalization = True
@@ -1498,6 +1529,65 @@ pe.partial_eval_jaxpr_custom_rules[scan_p] = _scan_partial_eval_custom
 pe.padding_rules[scan_p] = _scan_padding_rule
 pe.dce_rules[scan_p] = _scan_dce_rule
 state_discharge.register_partial_discharge_rule(scan_p)(_scan_state_partial_discharge_rule)
+pe.custom_staging_rules[scan_p] = _scan_staging
+
+def _is_high(jaxpr, **_) -> bool:
+  return jaxpr.jaxpr.is_high
+scan_p.is_high = _is_high  # type: ignore
+
+def _to_lojax(*hi_args, jaxpr, num_carry, num_consts, linear, **params):
+  ienv, fenv = jaxpr.jaxpr.initial_typechange_env, jaxpr.jaxpr.final_typechange_env
+
+  # move box binders and hi_args from consts slots to carry slots
+  to_move = [t.mutable for t in jaxpr.in_avals[:num_consts]]
+  jaxpr = pe.move_invars_right(jaxpr, to_move)
+  hi_args = _move_right(hi_args, to_move)
+  num_consts -= sum(to_move)
+  num_carry += sum(to_move)
+
+  # expand num_consts, num_carry, linear according to lo types
+  const_invars, carry_invars, _ = split_list(jaxpr.jaxpr.invars, [num_consts, num_carry])
+  num_consts = sum(len(v.aval.lo_ty() if not v.aval.mutable
+                       else v.aval.lo_ty_(ienv[v])) for v in const_invars)
+  num_carry = sum(len(v.aval.lo_ty() if not v.aval.mutable
+                      else v.aval.lo_ty_(ienv[v])) for v in carry_invars)
+  linear = [l for v, l_ in zip(jaxpr.jaxpr.invars, linear)
+            for l in (l_,) * len(v.aval.lo_ty() if not v.aval.mutable
+                                 else v.aval.lo_ty_(ienv[v]))]
+  lo_muts_out = sum(len(m.leaf_avals) for m in fenv.values())  # TODO hardcoded
+
+  # collect lo inputs values
+  lo_args = [lo_val for v, x in zip(jaxpr.jaxpr.invars, hi_args)
+             for lo_val in (v.aval.read_loval(ienv[v], x) if v.aval.mutable
+                            else v.aval.lower_val(x))]
+
+  # lower the jaxpr and bind it using lo input values
+  lo_jaxpr = pe.lower_jaxpr(jaxpr)
+  all_outs = scan_p.bind(*lo_args, jaxpr=lo_jaxpr, num_consts=num_consts,
+                         num_carry=num_carry, linear=tuple(linear), **params)
+  out_mut, lo_outs = split_list(all_outs, [lo_muts_out])
+
+  # collect and apply mutations
+  out_mut_ = iter(out_mut)
+  in_idx = {v: i for i, v in enumerate(jaxpr.jaxpr.invars)}
+  for var, ty in jaxpr.jaxpr.final_typechange_env.items():
+    lo_vals = it.islice(out_mut_, len(var.aval.lo_ty_(ty)))
+    var.aval.update_from_loval(ty, hi_args[in_idx[var]], *lo_vals)
+  assert next(out_mut_, None) is None
+
+  # collect output values into hi types
+  lo_outs_ = iter(lo_outs)
+  hi_outs = [t.raise_val(*it.islice(lo_outs_, len(t.lo_ty())))
+             for t in jaxpr.out_avals]
+  assert next(lo_outs_, None) is None
+
+  return hi_outs
+scan_p.to_lojax = _to_lojax
+
+def _move_right(lst, to_move):
+  lst, rest = split_list(lst, [len(to_move)])
+  left, right = partition_list(to_move, lst)
+  return [*left, *right, *rest]
 
 def _propagate_mem_kind_scan(*xm, reverse, length, num_consts, num_carry, jaxpr,
                              linear, unroll, _split_transpose):

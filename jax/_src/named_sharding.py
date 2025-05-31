@@ -23,7 +23,6 @@ from typing import Any, Union
 from jax._src import config
 from jax._src.util import use_cpp_class, cache, use_cpp_method
 from jax._src.lib import xla_client as xc
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib.mlir.dialects import sdy
 from jax._src import mesh as mesh_lib
 from jax._src.mesh import AxisType
@@ -289,13 +288,6 @@ class SdyDim:
     priority_repr = '' if self.priority is None else f'p{self.priority}'
     return f'{{{axes_repr}{open_repr}}}{priority_repr}'
 
-def _get_axes(axes, mesh_shape):
-  if not axes:
-    return ()
-  assert mesh_shape is not None
-  # Sort wrt mesh axis names so order is deterministic and doesn't hang in
-  # McJAX.
-  return tuple(n for n, _ in mesh_shape if n in axes)
 
 @dataclasses.dataclass(kw_only=True)
 class SdyArray:
@@ -315,19 +307,11 @@ class SdyArray:
           [sdy.MeshAxisAttr.get(name, size) for name, size in self.mesh_shape],
           ldi)
 
-    replicated_axes = _get_axes(self.replicated_axes, self.mesh_shape)
-    unreduced_axes = _get_axes(self.unreduced_axes, self.mesh_shape)
-    if jaxlib_extension_version >= 342:
-      return sdy.TensorShardingAttr.get(
-          mesh_attr,
-          [dim_sharding.build() for dim_sharding in self.dim_shardings],
-          replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in replicated_axes],
-          unreduced_axes=[sdy.AxisRefAttr.get(axis) for axis in unreduced_axes])
-    else:
-      return sdy.TensorShardingAttr.get(
-          mesh_attr,
-          [dim_sharding.build() for dim_sharding in self.dim_shardings],
-          replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in replicated_axes])
+    return sdy.TensorShardingAttr.get(
+        mesh_attr,
+        [dim_sharding.build() for dim_sharding in self.dim_shardings],
+        replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in self.replicated_axes],
+        unreduced_axes=[sdy.AxisRefAttr.get(axis) for axis in self.unreduced_axes])
 
   def __repr__(self):
     dim_sharding_repr = ', '.join(
@@ -349,7 +333,7 @@ def modify_sdy_sharding_wrt_axis_types(sdy_sharding: SdyArray, mesh):
       dim_shardings.append(SdyDim(axes=[], is_open=True)
                            if not d.axes and not d.is_open else d)
       used_axes.extend(d.axes)
-    remaining_axes = set(mesh.axis_names) - set(used_axes)
+    remaining_axes = tuple(n for n in mesh.axis_names if n not in used_axes)
     replicated_axes = tuple(r for r in remaining_axes
                             if mesh._name_to_type[r] == mesh_lib.AxisType.Explicit)
     return SdyArray(mesh_shape=sdy_sharding.mesh_shape,

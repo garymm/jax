@@ -245,7 +245,8 @@ def _attention_forward(q, k, v, config: TuningConfig, save_residuals: bool = Fal
         plgpu.copy_gmem_to_smem(k_ref.at[s], k_smem.at[i], k_barriers.at[i])
         plgpu.copy_gmem_to_smem(v_ref.at[s], v_smem.at[i], v_barriers.at[i])
 
-      def kv_loop(kv_step, _):
+      @pl.loop(0, block_max_kv_steps - max_concurrent_steps)
+      def _kv_loop(kv_step):
         tma_step = kv_step + max_concurrent_steps
         tma_slot = lax.rem(kv_step, jnp.array(max_concurrent_steps, kv_step.dtype))
         s = (batch, pl.ds(tma_step * block_kv, block_kv), kv_head)
@@ -253,7 +254,6 @@ def _attention_forward(q, k, v, config: TuningConfig, save_residuals: bool = Fal
         plgpu.copy_gmem_to_smem(k_ref.at[s], k_smem.at[tma_slot], k_barriers.at[tma_slot])
         plgpu.barrier_wait(v_consumed_barriers.at[tma_slot])
         plgpu.copy_gmem_to_smem(v_ref.at[s], v_smem.at[tma_slot], v_barriers.at[tma_slot])
-      lax.fori_loop(0, block_max_kv_steps - max_concurrent_steps, kv_loop, None)
 
   def entry(q_ref, k_ref, v_ref, out_ref, lse_ref):
     compute_wgs = 2
@@ -278,9 +278,9 @@ def _attention_forward(q, k, v, config: TuningConfig, save_residuals: bool = Fal
         lambda *args: kernel(q_ref, k_ref, v_ref, out_ref, lse_ref, args),
         scratch,
         (
-            plgpu.Barrier(1, num_barriers=max_concurrent_steps),
-            plgpu.Barrier(1, num_barriers=max_concurrent_steps),
-            plgpu.Barrier(1, num_barriers=compute_wgs),
+            plgpu.Barrier(num_barriers=max_concurrent_steps),
+            plgpu.Barrier(num_barriers=max_concurrent_steps),
+            plgpu.Barrier(num_barriers=compute_wgs),
         ),
         (plgpu.Barrier(num_arrivals=compute_wgs, num_barriers=max_concurrent_steps),) * 2,
         plgpu.Barrier(num_arrivals=compute_wgs),
@@ -306,7 +306,7 @@ def _attention_forward(q, k, v, config: TuningConfig, save_residuals: bool = Fal
       grid_names=("batch", "q_seq", "heads"),
       num_threads=3,
       thread_name="wg",
-      compiler_params=plgpu.GPUCompilerParams(approx_math=True),
+      compiler_params=plgpu.CompilerParams(approx_math=True),
   )(q, k, v)
 
   if save_residuals:
@@ -451,11 +451,11 @@ def _attention_bwd(config: TuningConfig, save_residuals: bool, res, do):
         manual_consumed_barriers=True,
         compute_context=_compute_thread,
         in_specs=[
-            plgpu.GPUBlockSpec(  # k
+            plgpu.BlockSpec(  # k
                 block_shape=(block_kv, head_dim),
                 index_map=lambda i: (i, 0),
                 transforms=[tiling, swizzle]),
-            plgpu.GPUBlockSpec(  # v
+            plgpu.BlockSpec(  # v
                 block_shape=(block_kv, head_dim),
                 index_map=lambda i: (i, 0),
                 transforms=[tiling, swizzle]),
@@ -558,16 +558,16 @@ def _attention_bwd(config: TuningConfig, save_residuals: bool, res, do):
       manual_consumed_barriers=True,
       compute_context=_compute_thread,
       in_specs=[
-          plgpu.GPUBlockSpec(  # q
+          plgpu.BlockSpec(  # q
               block_shape=(block_q, head_dim),
               index_map=lambda i: (i, 0),
               transforms=[tiling, swizzle]),
-          plgpu.GPUBlockSpec(  # do
+          plgpu.BlockSpec(  # do
               block_shape=(block_q, head_dim),
               index_map=lambda i: (i, 0),
               transforms=[tiling, swizzle]),
-          plgpu.GPUBlockSpec(block_shape=(block_q,), index_map=lambda i: (i,)),
-          plgpu.GPUBlockSpec(block_shape=(block_q,), index_map=lambda i: (i,))
+          plgpu.BlockSpec(block_shape=(block_q,), index_map=lambda i: (i,)),
+          plgpu.BlockSpec(block_shape=(block_q,), index_map=lambda i: (i,))
       ])
     q_ref = q_ref.at[batch, :, q_head, :]
     do_ref = do_ref.at[batch, :, q_head, :]
@@ -587,9 +587,9 @@ def _attention_bwd(config: TuningConfig, save_residuals: bool, res, do):
       out_shape=q,
       scratch_shapes=[
           (q_scratch, do_scratch, lse_scratch, delta_scratch),  # type: ignore
-          (plgpu.Barrier(1, num_barriers=compute_wgs),) * 4  # type: ignore
+          (plgpu.Barrier(num_barriers=compute_wgs),) * 4  # type: ignore
       ],
-      compiler_params=plgpu.GPUCompilerParams(approx_math=True),
+      compiler_params=plgpu.CompilerParams(approx_math=True),
       grid=(batch_size, num_q_tiles, num_q_heads),
       grid_names=("batch", "q_seq", "heads"),
       num_threads=compute_wgs + 1,
@@ -608,9 +608,9 @@ def _attention_bwd(config: TuningConfig, save_residuals: bool, res, do):
     out_shape=[out_shape_kv, out_shape_kv],
     scratch_shapes=[
         (k_scratch, v_scratch),  # type: ignore
-        (plgpu.Barrier(1, num_barriers=compute_wgs),) * 2  # type: ignore
+        (plgpu.Barrier(num_barriers=compute_wgs),) * 2  # type: ignore
   ],
-    compiler_params=plgpu.GPUCompilerParams(approx_math=True),
+    compiler_params=plgpu.CompilerParams(approx_math=True),
     grid=(batch_size, num_kv_tiles, num_q_heads),
     grid_names=("batch", "kv_seq", "heads"),
     num_threads=compute_wgs + 1,
@@ -658,10 +658,9 @@ def attention_with_pipeline_emitter(q, k, v, config: TuningConfig, save_residual
   if rem:
     raise NotImplementedError(f"{q_seq_len=} must be a multiple of {block_q * 2=}")
 
-  def fa3_kernel(q_ref, k_ref, v_ref, out_ref, lse_ref, scoped):
+  def fa3_kernel(q_ref, k_ref, v_ref, out_ref, lse_ref, smem_buffers, q_barriers, schedule_barrier):
     batch = lax.axis_index("batch")
     wg_idx = lax.axis_index("wg")
-    smem_buffers, q_barriers, schedule_barrier = scoped
     qo_smem2, lse_smem2 = smem_buffers
     q_seq_base = lax.axis_index("q_seq") * (2 * block_q) + wg_idx * block_q
     q_head = lax.axis_index("heads")
@@ -746,10 +745,10 @@ def attention_with_pipeline_emitter(q, k, v, config: TuningConfig, save_residual
         manual_consumed_barriers=True,
         compute_context=_compute_thread,
         in_specs=[
-            plgpu.GPUBlockSpec(  # k
+            plgpu.BlockSpec(  # k
                 block_shape=(block_kv, head_dim),
                 index_map=lambda i: (i, 0)),
-            plgpu.GPUBlockSpec(  # v
+            plgpu.BlockSpec(  # v
                 block_shape=(block_kv, head_dim),
                 index_map=lambda i: (i, 0)),
         ],
@@ -758,46 +757,31 @@ def attention_with_pipeline_emitter(q, k, v, config: TuningConfig, save_residual
     k_ref = k_ref.at[batch, :, kv_head, :]
     v_ref = v_ref.at[batch, :, kv_head, :]
     pipeline(k_ref, v_ref)
-  mesh = plgpu.GPUMesh(
+
+  out_shape = [q, None]
+  if save_residuals:
+    out_shape[1] = jax.ShapeDtypeStruct((batch_size, num_q_heads, q_seq_len), jnp.float32)
+
+  qo_scratch = plgpu.SMEM((compute_wgs, block_q, head_dim), jnp.float16)
+  smem_scratch = [qo_scratch, None]
+  if save_residuals:
+    smem_scratch[1] = plgpu.SMEM((compute_wgs, block_q), jnp.float32)
+
+  out, lse = plgpu.kernel(
+      fa3_kernel,
       grid=(batch_size, num_q_tiles, num_q_heads),
       grid_names=("batch", "q_seq", "heads"),
       num_threads=3,
       thread_name="wg",
-  )
-  def run(refs):
-    q_ref, k_ref, v_ref, out_ref, lse_ref = refs
-
-    @pl.core_map(
-        mesh,
-        compiler_params=plgpu.GPUCompilerParams(
-            approx_math=True, lowering_semantics=plgpu.LoweringSemantics.Warpgroup
-        ),
-    )
-    def _kernel_entry():
-      qo_scratch = plgpu.SMEM(
-          (compute_wgs, block_q, head_dim), jnp.float16,
-      )
-      scratch = [qo_scratch, None]
-      if save_residuals:
-        scratch[1] = plgpu.SMEM((compute_wgs, block_q), jnp.float32)
-      pl.run_scoped(
-          lambda *args: fa3_kernel(q_ref, k_ref, v_ref, out_ref, lse_ref, args),
-          scratch,
-          plgpu.Barrier(1, num_barriers=compute_wgs),
-          plgpu.Barrier(num_arrivals=compute_wgs),
-          collective_axes="wg",
-      )
-  @jax.jit
-  def run_function(q, k, v, o, lse):
-    *_, out, lse = pl.run_state(run)((q, k, v, o, lse))
-    return out, lse
-
-  lse = (
-      jnp.full((batch_size, num_q_heads, q_seq_len), -jnp.inf, dtype=jnp.float32)
-      if save_residuals
-      else None
-  )
-  out, lse = run_function(q, k, v, jnp.full_like(q, jnp.inf), lse)
+            out_shape=out_shape,
+      scratch_shapes=(
+          tuple(smem_scratch),  # type: ignore
+          plgpu.Barrier(num_barriers=compute_wgs),  # type: ignore
+          plgpu.Barrier(num_arrivals=compute_wgs),),  # type: ignore
+      compiler_params=plgpu.CompilerParams(
+          approx_math=True, lowering_semantics=plgpu.LoweringSemantics.Warpgroup,
+      ),
+  )(q, k, v)
 
   if save_residuals:
     assert lse is not None

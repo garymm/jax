@@ -61,6 +61,7 @@ from jax._src.pallas import core as pallas_core
 from jax._src.pallas import pallas_call
 from jax._src.pallas import primitives
 from jax._src.pallas import utils as pallas_utils
+from jax._src.pallas import helpers as pallas_helpers
 from jax._src.pallas.mosaic import core as tpu_core
 from jax._src.pallas.mosaic import error_handling
 from jax._src.pallas.mosaic import primitives as tpu_primitives
@@ -221,7 +222,11 @@ def _memory_space_to_tpu_memory_space(memory_space: MemorySpace | None
     case pallas_core.MemorySpace.ANY:
       # Map the general ANY memory space to TPU ANY memory space
       return TPUMemorySpace.ANY
-    case pallas_core.MemorySpace.ERROR | pallas_core.MemorySpace.INDEX:
+    case (
+        pallas_core.MemorySpace.ERROR
+        | pallas_core.MemorySpace.INDEX
+        | pallas_core.MemorySpace.KEY
+    ):
       return TPUMemorySpace.SMEM
     case TPUMemorySpace():
       # Leave the memory space unchanged
@@ -235,7 +240,7 @@ def _memory_space_to_mosaic_attribute(memory_space: MemorySpace | None
   tpu_memory_space = _memory_space_to_tpu_memory_space(memory_space)
   return ir.Attribute.parse(f"#tpu.memory_space<{tpu_memory_space}>")
 
-def _dtype_to_ir_type(dtype: jnp.dtype,
+def _dtype_to_ir_type(dtype: jax.typing.DTypeLike,
                       is_kernel_boundary: bool = False) -> ir.Type:
   if jnp.issubdtype(dtype, pallas_core.semaphore_dtype):
     if jnp.issubdtype(dtype, tpu_core.dma_semaphore):
@@ -246,11 +251,11 @@ def _dtype_to_ir_type(dtype: jnp.dtype,
       return ir.Type.parse("!tpu.semaphore")
     else:
       raise NotImplementedError
-  if is_kernel_boundary and jnp.issubdtype(dtype, jnp.dtype('bool')):
+  if is_kernel_boundary and jnp.issubdtype(dtype, jnp.bool):
     dtype = BOOL_MEMREF_TYPE
   # TODO(justinfu): Remove after mosaic supports unsigned types.
   # This conversion makes mosaic interpret all unsigned types as signed types.
-  type =  mlir.dtype_to_ir_type(dtype)
+  type =  mlir.dtype_to_ir_type(jnp.dtype(dtype))
   if isinstance(type, ir.IntegerType):
     return ir.IntegerType.get_signless(type.width)
   else:
@@ -364,7 +369,7 @@ def _get_arg_type(
 ):
   memory_space = None
   if isinstance(aval, pallas_core.AbstractMemoryRef):
-    memory_space = aval.memory_space
+    memory_space = _memory_space_to_tpu_memory_space(aval.memory_space)
     # We assume unannotated memory refs are in VMEM
     if memory_space is None:
       memory_space = TPUMemorySpace.VMEM
@@ -594,10 +599,10 @@ def _check_block_mappings(
     rank = len(bm.block_shape)
     # TODO(necula): add tests for SMEM blocks with trivial windowing
     # We support scalars too
-    if (bm.block_aval.memory_space == tpu_core.TPUMemorySpace.SMEM and
-        bm.has_trivial_window()):
+    memory_space = _memory_space_to_tpu_memory_space(bm.block_aval.memory_space)
+    if memory_space == tpu_core.TPUMemorySpace.SMEM and bm.has_trivial_window():
       continue
-    if bm.block_aval.memory_space == tpu_core.TPUMemorySpace.SEMAPHORE:
+    if memory_space == tpu_core.TPUMemorySpace.SEMAPHORE:
       continue
 
     def err_details():
@@ -613,8 +618,10 @@ def _check_block_mappings(
           "The Pallas TPU lowering currently supports only blocks of "
           "rank >= 1. " + err_details())
 
-    if (bm.block_aval.memory_space == tpu_core.TPUMemorySpace.ANY and
-        not bm.has_trivial_window()):
+    if (
+        memory_space == tpu_core.TPUMemorySpace.ANY
+        and not bm.has_trivial_window()
+    ):
       raise ValueError(
           "The Pallas TPU lowering currently supports in memory space ANY "
           "only blocks having the same block shape as the array shape "
@@ -1921,20 +1928,6 @@ def _broadcast_in_dim_lowering_rule(
   if aval_in.shape == shape:
     return val
 
-  if jnp.issubdtype(aval_in.dtype, jnp.bool_):
-    # Direct broadcasts for bools are not supported in Mosaic due to booleans
-    # living in mask registers and broadcast operating on vregs. Broadcast as an
-    # integer instead and cast back to a bool.
-    # TODO(b/351019164): Implement this logic in Mosaic BroadcastOp instead.
-    def _proxy_fun(val, *, shape, broadcast_dimensions):
-      int_val = jnp.where(val, 1, 0)
-      bcast_val = jax.lax.broadcast_in_dim(int_val, shape, broadcast_dimensions)
-      return bcast_val == 1
-    proxy_lowering = lower_fun(
-        _proxy_fun, multiple_results=False)
-    return proxy_lowering(
-        ctx, val, shape=shape, broadcast_dimensions=broadcast_dimensions)
-
   if broadcast_dimensions:
     out_shape_list = [1] * len(shape)
     for i, s in zip(broadcast_dimensions, aval_in.shape):
@@ -2369,7 +2362,7 @@ def _gather_lowering_rule(
         operand_batching_dims=(1,),
         start_indices_batching_dims=(1,),
     ):
-      return tpu.dynamic_gather(out_type, x, recovered_indices, 0)
+      return tpu.dynamic_gather(x, recovered_indices, 0)
     if dimension_numbers == lax.GatherDimensionNumbers(
         offset_dims=(),
         collapsed_slice_dims=(1,),
@@ -2377,13 +2370,15 @@ def _gather_lowering_rule(
         operand_batching_dims=(0,),
         start_indices_batching_dims=(0,),
     ):
-      return tpu.dynamic_gather(out_type, x, recovered_indices, 1)
+      return tpu.dynamic_gather(x, recovered_indices, 1)
   raise NotImplementedError("Unsupported gather")
 
 
 @register_lowering_rule(lax.transpose_p)
 def _transpose_lowering_rule(ctx: LoweringRuleContext, x, *, permutation):
-  if permutation != (1, 0):
+  minormost_transpose = (1, 0)
+  untiled_tiled_swap = (1, 0, 2)
+  if permutation not in (minormost_transpose, untiled_tiled_swap):
     raise NotImplementedError
   out_type = aval_to_ir_type(
       ctx.lowering_context.dynamic_shape_replacement_fn, ctx.avals_out[0]
@@ -2444,7 +2439,7 @@ class FoldingError(Exception):
 def _fold_and_get_constant_value(x):
   def _fold(x, fuel):
     if fuel <= 0:
-      raise FoldingError("Folding depth exceeded")
+      raise FoldingError()
     op_name = getattr(x.owner, "name", None)
     binop_folds = {
         "arith.maxsi": max,
@@ -2459,7 +2454,7 @@ def _fold_and_get_constant_value(x):
         raise ValueError(f"Unsupported constant type: {x.type}")
     if op_name in binop_folds:
       return binop_folds[op_name](_fold(v, fuel - 1) for v in x.owner.operands)
-    raise FoldingError(f"Folding not supported for {x.owner}")
+    raise FoldingError()
 
   try:
     return _fold(x, 10)
@@ -2994,7 +2989,7 @@ def _lower_jaxpr_to_for_loop(ctx: LoweringRuleContext,
   return for_op.results
 
 
-@register_lowering_rule(lax.scan_p, ensure_mlir_values=False)
+@register_lowering_rule(lax.scan_p, kernel_types=[*tpu_core.KernelType], ensure_mlir_values=False)
 def _scan_lowering_rule(
     ctx: LoweringRuleContext,
     *args,
@@ -3203,15 +3198,16 @@ def _debug_callback_lowering_rule(ctx: LoweringRuleContext, *args, **kwargs):
   return []
 
 
-@register_lowering_rule(primitives.program_id_p)
+@register_lowering_rule(
+    primitives.program_id_p, kernel_types=[*tpu_core.KernelType]
+)
 def _program_id_lowering_rule(ctx: LoweringRuleContext, *, axis: int):
-
   if ctx.lowering_context.user_grid_indices is None:
     raise ValueError(
         f"program id: {axis} was passed, but user did not provide a grid."
     )
   length = len(ctx.lowering_context.user_grid_indices)
-  if not (0 <= axis < length):
+  if axis not in range(length):
     raise ValueError(
         f"user passed in program id with axis: {axis}, but grid only has"
         f" length: {length}"
@@ -3219,7 +3215,9 @@ def _program_id_lowering_rule(ctx: LoweringRuleContext, *, axis: int):
   return ctx.lowering_context.user_grid_indices[axis]
 
 
-@register_lowering_rule(primitives.num_programs_p)
+@register_lowering_rule(
+    primitives.num_programs_p, kernel_types=[*tpu_core.KernelType]
+)
 def _num_programs_lowering_rule(ctx: LoweringRuleContext, *, axis: int):
   mapped_axes = set(ctx.lowering_context.mapped_dims)
   seen_user_axes = 0
@@ -3720,10 +3718,16 @@ def random_bits_lowering(ctx, keys, *, bit_width, shape):
 
 @register_lowering_rule(prng.random_fold_in_p)
 def random_fold_in_lowering(ctx, keys, msgs):
-  keys_aval, _ = ctx.avals_in
+  keys_aval, msgs_aval = ctx.avals_in
   impl = keys_aval.dtype._impl
   fold_in_lowering = lower_fun(impl.fold_in, multiple_results=False)
-  return fold_in_lowering(ctx, keys, msgs)
+  if pl_random.is_pallas_impl(impl):
+    return fold_in_lowering(ctx, keys, msgs)
+  else:
+    ctx = dataclasses.replace(ctx,
+                        avals_in=[jax_core.physical_aval(keys_aval), msgs_aval],
+                        avals_out=map(jax_core.physical_aval, ctx.avals_out))
+    return fold_in_lowering(ctx, keys, msgs)
 
 
 @register_lowering_rule(prng.random_unwrap_p)
@@ -3764,38 +3768,30 @@ def _join_key_lowering_rule(ctx: LoweringRuleContext, *scalars, impl):
 
 
 @register_lowering_rule(checkify.check_p)
-def _checkify_lowering_rule(
-    ctx: LoweringRuleContext, *err_args, err_tree, debug):
-  if not tpu_core.runtime_assert_enabled():
-    if debug:
-      return []
-    else:
-      raise LoweringException("Non-debug check must be functionalized. "
-                              "Enable runtime asserts with "
-                              "--jax_pallas_enable_runtime_assert "
-                              "or functionalize with checkify.check.")
+def _check_lowering_rule(
+    ctx: LoweringRuleContext, *err_args, err_tree, debug
+):
+  del ctx  # Unused.
 
-  if cf is None:
-    # TODO(slebedev): Remove once the minimal jaxlib version is 0.6.1.
-    raise ValueError(
-        "cf dialect is not available. Make sure you have jaxlib 0.6.1 or later."
+  if not debug:
+    raise NotImplementedError(
+        "Non-debug checks are not supported by the Mosaic backend."
+        " Functionalize them via `jax.experimental.checkify`."
     )
+  if not pallas_helpers.debug_checks_enabled():
+    return []
 
   error = jax.tree.unflatten(err_tree, err_args)
-  assert len(error._pred) == 1
-  assert len(error._metadata) == 1
-  assert len(error._payload) == 1
-  pred = list(error._pred.items())[0][1]
-  metadata = list(error._metadata.items())[0]
-  payload = list(error._payload.items())[0][1]
-  exception_tree = metadata[1]
+  [pred] = error._pred.values()
+  [exception_tree] = error._metadata.values()
+  [payload] = error._payload.values()
   exception = jax.tree.unflatten(exception_tree, payload)
   assert isinstance(exception, checkify.FailedCheckError)
+  assert isinstance(exception, checkify.FailedCheckError)
 
-  # check_p has an inverted predicate compared to assert,
-  # so we need to compute not(pred) here.
-  out_scalar_type = _dtype_to_ir_type(jnp.dtype('bool'))
-  minus_one = ir_constant(-1, out_scalar_type)
+  # check_p has an inverted predicate compared to assert, so we need to compute
+  # ``not pred`` here.
+  minus_one = ir_constant(-1, _dtype_to_ir_type(jnp.bool))
   not_pred = arith.xori(pred, minus_one)
   cf.assert_(not_pred, exception.fmt_string)
   return []
