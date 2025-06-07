@@ -48,7 +48,7 @@ from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
 from jax._src.internal_test_util import lax_test_util
 from jax._src.lax import lax as lax_internal
-from jax._src.util import NumpyComplexWarning, safe_zip
+from jax._src.util import safe_zip
 from jax._src.tree_util import tree_map
 
 config.parse_flags_with_absl()
@@ -2631,6 +2631,11 @@ class LaxTest(jtu.JaxTestCase):
     self._CheckAgainstNumpy(op, reference_top_k, args_maker)
     self._CompileAndCheck(op, args_maker)
 
+  def testTopKOverflow(self):
+    x = jax.ShapeDtypeStruct((2 ** 31 + 1,), np.dtype('bfloat16'))
+    with self.assertRaisesRegex(ValueError, "top_k returns int32 indices, which will overflow"):
+      jax.eval_shape(lambda x: jax.lax.top_k(x, 100), x)
+
   @jtu.sample_product(
     [dict(lhs_shape=lhs_shape, rhs_shape=rhs_shape)
       for lhs_shape, rhs_shape in [((3, 2), (2, 4)),
@@ -3744,7 +3749,7 @@ class LazyConstantTest(jtu.JaxTestCase):
 
   @jtu.sample_product(
       dtype_in=lax_test_util.all_dtypes, dtype_out=lax_test_util.all_dtypes)
-  @jtu.ignore_warning(category=NumpyComplexWarning)
+  @jtu.ignore_warning(category=np.exceptions.ComplexWarning)
   def testConvertElementTypeAvoidsCopies(self, dtype_in, dtype_out):
     x = jax.device_put(np.zeros(5, dtype_in))
     self.assertEqual(x.dtype, dtype_in)
@@ -4395,7 +4400,7 @@ class FunctionAccuracyTest(jtu.JaxTestCase):
     #
     # In addition, the 1/3 middle parts of regions q1, q2, q3, q4,
     # neg, pos are tested separately as these don't contain extremely
-    # small or extremelly large values and functions on these regions
+    # small or extremely large values and functions on these regions
     # ought not to possess any incorrectness issues.
 
     s0, s1 = size_re, size_im

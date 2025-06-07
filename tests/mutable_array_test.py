@@ -192,13 +192,17 @@ class MutableArrayTest(jtu.JaxTestCase):
     x = f()
     self.assertArraysEqual(x, jnp.zeros(8))
 
-  def test_grad_mutable_array(self):
-    @jax.jit
+  @parameterized.parameters([False, True])
+  def test_grad_mutable_array(self, jit):
+
     def f(x):
       x_ = core.mutable_array(x)
       x_[()] = x_[()] + x_[()]
       y = core.freeze(x_)
       return y
+
+    if jit:
+      f = jax.jit(f)
 
     ans = jax.grad(f)(1.)
     expected = 2.0
@@ -249,6 +253,27 @@ class MutableArrayTest(jtu.JaxTestCase):
     ys = f(xs)
     self.assertAllClose(ys, xs ** 2, check_dtypes=False)
 
+  def test_vmap_extensive_inputs(self):
+    def f(x_ref, val):
+      x_ref[...] += val
+      x_ref[...] += val
+
+    xs_ref = core.mutable_array(jnp.array([0, 0, 0]))
+    vals = jnp.arange(3)
+    jax.vmap(f)(xs_ref, vals)
+    self.assertAllClose(xs_ref[...], 2 * vals, check_dtypes=False)
+
+  def test_vmap_closed_over_read_only(self):
+    y_ref = core.mutable_array(1)
+
+    def f(x_ref):
+      x_ref[...] += y_ref[...]
+      x_ref[...] += y_ref[...]
+
+    xs_ref = core.mutable_array(jnp.array([0, 0, 0]))
+    jax.vmap(f)(xs_ref)
+    self.assertAllClose(xs_ref[...], jnp.array([2, 2, 2]), check_dtypes=False)
+
   def test_implicit_bitcast_regression(self):
     # https://github.com/jax-ml/jax/issues/27683
     v = core.mutable_array(jnp.array([0, 0, 0]))
@@ -263,6 +288,81 @@ class MutableArrayTest(jtu.JaxTestCase):
     key = core.mutable_array(jax.random.key(0))
     # test read/write
     key[...] = jax.random.fold_in(key[...], 1) # don't crash
+
+  def test_scan_grad_doesnt_hoist_mutable_stuff(self):
+    x_ref = core.mutable_array(0)
+
+    def f(x):
+      def body(c, _):
+        x_ref[...] += 1
+        return c, ()
+      x, () = jax.lax.scan(body, x, (), length=3)
+      return x
+
+    jax.grad(f)(1.0)
+    self.assertAllClose(x_ref[...], 3, check_dtypes=False)
+
+  def test_scan_grad_doesnt_hoist_mutable_stuff2(self):
+    x_ref = core.mutable_array(0)
+    const = jnp.arange(3)
+    const2 = jnp.zeros(())
+
+    def f(x):
+      def body(c, _):
+        x_ref[...] += const.sum()
+        return c + const2, ()
+      x, () = jax.lax.scan(body, x, (), length=4)
+      return x
+
+    jax.grad(f)(1.0)
+    self.assertAllClose(x_ref[...], 12, check_dtypes=False)
+
+  @parameterized.parameters([False, True])
+  def test_custom_vjp_grad_stats_plumbing(self, jit):
+
+   @jax.custom_vjp
+   def gradient_history_calculator(x, ref):
+     del ref
+     return x
+
+   def gradient_history_calculator_fwd(x, ref):
+     return x, ref
+
+   def gradient_history_calculator_bwd(amax_history, grad_output):
+     amax_update = jnp.max(jnp.abs(grad_output))
+     shifted = jnp.roll(amax_history[:], 1)
+     shifted = shifted.at[0].set(amax_update)
+     amax_history[:] = shifted
+     amax_from_history = jnp.max(amax_history[:])
+     grad_output = grad_output / amax_from_history
+     return grad_output, None
+
+   gradient_history_calculator.defvjp(
+     gradient_history_calculator_fwd,
+     gradient_history_calculator_bwd)
+
+   class DotOp:
+     def __init__(self):
+       self.amax_history = core.mutable_array(jnp.zeros(5,))
+
+     def forward(self, x, y):
+       out = jnp.dot(x, y)
+       out = gradient_history_calculator(out, self.amax_history)
+       return out
+
+   dot_op = DotOp()
+   x_top = jnp.ones((5,))
+   y_top = jnp.ones((5,))
+
+   def loss(x, y):
+     return dot_op.forward(x, y).sum()
+
+   if jit:
+     loss = jax.jit(loss)
+
+   for i in range(3):
+     jax.grad(loss, (0,1))(x_top, y_top)
+     self.assertAllClose(dot_op.amax_history[:], jnp.zeros((5,)).at[:i+1].set(1.0), check_dtypes=False)
 
 
 @jtu.with_config(jax_mutable_array_checks=True)
@@ -365,9 +465,23 @@ class MutableArrayErrorsTest(jtu.JaxTestCase):
     if jit:
       f = jax.jit(f)
     x_ref = core.mutable_array(0.)
+
+    jax.vjp(f, 3., x_ref)  # returning input ref, okay
+
+    @jax.custom_vjp
+    def g(x, ref):
+      return x
+    def g_fwd(x, _):
+      y_ref = core.mutable_array(0)
+      return x, y_ref
+    g.defvjp(g_fwd, lambda ref, g: g)
+    if jit:
+      g = jax.jit(g)
+    x_ref = core.mutable_array(0.)
+
     with self.assertRaisesRegex(
         ValueError, "custom_vjp fwd function"):
-      jax.vjp(f, 3., x_ref)
+      jax.vjp(g, 3., x_ref)
 
   @parameterized.parameters([False, True])
   def test_argument_aliases_custom_vjp_primal(self, jit):
@@ -412,6 +526,16 @@ class MutableArrayErrorsTest(jtu.JaxTestCase):
     self.assertAllClose(x_ref[...], 1.)
     out_false = f(False)
     self.assertAllClose(x_ref[...], 2.)
+
+  def test_vmap_closed_over_ref_write(self):
+    x_ref = core.mutable_array(jnp.zeros((), 'int32'))
+
+    def f(val):
+      x_ref[...] += val
+
+    vals = jnp.arange(3, dtype='int32')
+    with self.assertRaisesRegex(Exception, "unbatched mutable array"):
+      jax.vmap(f)(vals)
 
 
 if __name__ == '__main__':

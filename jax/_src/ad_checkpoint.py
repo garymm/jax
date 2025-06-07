@@ -578,7 +578,7 @@ def remat_partial_eval(trace: pe.JaxprTrace, *tracers: core.Tracer,
   out_jaxpr_tracers = [pe.JaxprTracer(trace, pe.PartialVal.unknown(x.aval), None)
                        for x in jaxpr_unknown.outvars]
   new_params = dict(params, jaxpr=jaxpr_unknown, differentiated=True)
-  recipe = pe.new_eqn_recipe(in_jaxpr_tracers, out_jaxpr_tracers, remat_p,
+  recipe = pe.new_eqn_recipe(trace, in_jaxpr_tracers, out_jaxpr_tracers, remat_p,
                              new_params, jaxpr_unknown.effects,
                              source_info_util.current())
 
@@ -621,7 +621,7 @@ def _insert_reduce_precision(jaxpr: core.Jaxpr, num_res: int) -> core.Jaxpr:
     if v not in used_vars:
       continue
     assert isinstance(v, core.Var)
-    newvar = core.Var(v.suffix, v.aval)
+    newvar = core.Var(v.aval)
     finfo = dtypes.finfo(v.aval.dtype)
     params = dict(exponent_bits=finfo.nexp, mantissa_bits=finfo.nmant)
     if v in constvars or v in invars:

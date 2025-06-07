@@ -35,9 +35,11 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Pass/PassManager.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/stl/optional.h"  // IWYU pragma: keep
@@ -48,6 +50,7 @@ limitations under the License.
 #include "nanobind/stl/unique_ptr.h"  // IWYU pragma: keep
 #include "nanobind/stl/variant.h"  // IWYU pragma: keep
 #include "nanobind/stl/vector.h"  // IWYU pragma: keep
+#include "shardy/dialect/sdy/ir/dialect.h"
 #include "jaxlib/guard_lib.h"
 #include "jaxlib/nb_class_ptr.h"
 #include "jaxlib/py_array.h"
@@ -60,6 +63,7 @@ limitations under the License.
 #include "jaxlib/python_ref_manager.h"
 #include "jaxlib/sharding.h"
 #include "jaxlib/traceback.h"
+#include "stablehlo/dialect/StablehloOps.h"
 #include "xla/literal.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/mlir_to_hlo.h"
@@ -83,11 +87,13 @@ limitations under the License.
 #include "xla/python/nb_numpy.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
+#include "xla/python/pjrt_ifrt/pjrt_executable.h"
 #include "xla/python/pjrt_ifrt/xla_compiler.h"
 #include "xla/python/pprof_profile_builder.h"
 #include "xla/python/types.h"
 #include "xla/python/version.h"
 #include "xla/service/platform_util.h"  // IWYU pragma: keep
+#include "xla/service/spmd/shardy/constants.h"
 #include "xla/shape.h"
 #include "xla/status_macros.h"
 #include "xla/tsl/concurrency/ref_count.h"
@@ -373,14 +379,9 @@ std::unique_ptr<ifrt::CompileOptions> MakeIfrtCompileOptions(
     ifrt_loaded_host_callbacks.push_back(tsl::FormRef(
         static_cast<ifrt::LoadedHostCallback*>(host_callback.data())));
   }
-#if JAX_IFRT_VERSION_NUMBER >= 6
   return std::make_unique<ifrt::XlaCompileOptions>(
       std::move(options), std::move(executable_devices),
       std::move(ifrt_loaded_host_callbacks));
-#else
-  return std::make_unique<ifrt::XlaCompileOptions>(
-      std::move(options), std::move(ifrt_loaded_host_callbacks));
-#endif
 }
 
 // Makes IFRT `DeserializeExecutableOptions` from XLA `CompileOptions` and
@@ -398,14 +399,50 @@ MakeIfrtDeserializeExecutableOptions(std::optional<CompileOptions> options,
     ifrt_loaded_host_callbacks.push_back(tsl::FormRef(
         static_cast<ifrt::LoadedHostCallback*>(host_callback.data())));
   }
-#if JAX_IFRT_VERSION_NUMBER >= 6
   return std::make_unique<ifrt::XlaDeserializeExecutableOptions>(
       std::move(options), std::move(executable_devices),
       std::move(ifrt_loaded_host_callbacks));
-#else
-  return std::make_unique<ifrt::XlaDeserializeExecutableOptions>(
-      std::move(options), std::move(ifrt_loaded_host_callbacks));
-#endif
+}
+
+// Returns true if the module has at least one GSPMD attribute or op, like an
+// `mhlo.sharding` attribute or `Sharding` custom call.
+// TODO(b/420837831): delete this once we don't fall back to GSPMD.
+bool HasGspmdAttrsOrOps(mlir::ModuleOp module) {
+  for (auto func : module.getOps<mlir::func::FuncOp>()) {
+    for (int64_t arg_index = 0; arg_index < func.getNumArguments();
+         ++arg_index) {
+      if (func.getArgAttr(arg_index, sdy::kXlaShardingAttr)) {
+        return true;
+      }
+    }
+    for (int64_t result_index = 0; result_index < func.getNumResults();
+         ++result_index) {
+      if (func.getResultAttr(result_index, sdy::kXlaShardingAttr)) {
+        return true;
+      }
+    }
+  }
+  // Check the module for a `Sharding` custom call.
+  bool has_gspmd = false;
+  module->walk([&has_gspmd](mlir::stablehlo::CustomCallOp custom_call) {
+    if (custom_call.getCallTargetName() ==
+        sdy::kShardingCustomCallTargetName &&
+       custom_call->hasAttr(sdy::kXlaShardingAttr)) {
+      has_gspmd = true;
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+  return has_gspmd;
+}
+
+// Check if the module has any sort of Shardy mesh:
+// - `mesh`
+// - `maximal_mesh_{X}`
+// - `empty_mesh`
+// TODO(b/420837831): delete this once we don't fall back to GSPMD.
+bool HasShardyMesh(mlir::ModuleOp module) {
+  return !module.getOps<mlir::sdy::MeshOp>().empty();
 }
 
 }  // namespace
@@ -461,6 +498,29 @@ PyClient::CompileAndLoadIfrtProgram(
       std::move(traceback), std::move(fingerprint));
 }
 
+/* static */ absl::StatusOr<nb_class_ptr<PyExecutable>> PyClient::Compile(
+    nb_class_ptr<PyClient> client, std::string mlir_module,
+    ifrt::DeviceListRef executable_devices, CompileOptions options) {
+  ifrt::ExecutableRef executable_ref;
+  {
+    mlir::MLIRContext context;
+    nb::gil_scoped_release gil_release;
+    TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
+                        ParseMlirModuleString(mlir_module, context));
+    TF_ASSIGN_OR_RETURN(
+        auto topology,
+        client->ifrt_client()->GetTopologyForDevices(executable_devices));
+    auto xla_options = std::make_unique<ifrt::XlaCompileOptions>(
+        options, std::move(executable_devices));
+    TF_ASSIGN_OR_RETURN(auto pjrt_executable,
+                        PjRtCompile(std::move(options), module.get(),
+                                    *topology->description()));
+    TF_ASSIGN_OR_RETURN(executable_ref, ifrt::PjRtExecutable::Create(
+                                            std::move(pjrt_executable)));
+  }
+  return make_nb_class<PyExecutable>(executable_ref);
+}
+
 /* static */ absl::StatusOr<nb_class_ptr<PyLoadedExecutable>>
 PyClient::CompileAndLoad(nb_class_ptr<PyClient> client, std::string mlir_module,
                          ifrt::DeviceListRef executable_devices,
@@ -469,10 +529,18 @@ PyClient::CompileAndLoad(nb_class_ptr<PyClient> client, std::string mlir_module,
   mlir::MLIRContext context;
   TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
                       ParseMlirModuleString(mlir_module, context));
-  if (options.executable_build_options.use_shardy_partitioner()) {
-    // Since Shardy is located in the middle of the XLA pipeline, we need to
-    // export it before going to HLO while preserving Shardy ops and attrs.
-    TF_RETURN_IF_ERROR(ExportShardyForHloRoundTrip(*module));
+  // TODO(b/420837831): Remove this once we don't need to fall back to GSPMD.
+  if (options.executable_build_options.use_shardy_partitioner() &&
+      HasGspmdAttrsOrOps(module.get())) {
+    LOG(WARNING)
+        << "Module has GSPMD attrs or ops, but Shardy is enabled. Disabling "
+           "Shardy and falling back to using GSPMD propagation.";
+    options.executable_build_options.set_use_shardy_partitioner(false);
+    if (HasShardyMesh(module.get())) {
+      // Shardy is not enabled, but the module has shardy ops. Likely due to
+      // export loading a GSPMD checkpoint. Fall back to GSPMD.
+      TF_RETURN_IF_ERROR(ExportShardyForGSPMD(*module));
+    }
   }
   return CompileAndLoadIfrtProgram(
       client, std::make_unique<xla::ifrt::HloProgram>(module.get()),
@@ -488,11 +556,6 @@ PyClient::CompileAndLoad(nb_class_ptr<PyClient> client, std::string mlir_module,
   mlir::MLIRContext context;
   TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
                       ParseMlirModuleString(mlir_module, context));
-  if (options.executable_build_options.use_shardy_partitioner()) {
-    // Since Shardy is located in the middle of the XLA pipeline, we need to
-    // export it before going to HLO while preserving Shardy ops and attrs.
-    TF_RETURN_IF_ERROR(ExportShardyForHloRoundTrip(*module));
-  }
 
   std::vector<tsl::RCReference<ifrt::LoadedHostCallback>>
       ifrt_loaded_host_callbacks;
@@ -504,14 +567,9 @@ PyClient::CompileAndLoad(nb_class_ptr<PyClient> client, std::string mlir_module,
         client->ifrt_client(), std::move(host_callback));
     ifrt_loaded_host_callbacks.push_back(callback);
   }
-#if JAX_IFRT_VERSION_NUMBER >= 6
   auto compile_options = std::make_unique<ifrt::XlaCompileOptions>(
       std::move(options), std::move(executable_devices),
       std::move(ifrt_loaded_host_callbacks));
-#else
-  auto compile_options = std::make_unique<ifrt::XlaCompileOptions>(
-      std::move(options), std::move(ifrt_loaded_host_callbacks));
-#endif
   return CompileAndLoadIfrtProgram(
       client, std::make_unique<xla::ifrt::HloProgram>(module.get()),
       std::move(compile_options));
@@ -760,93 +818,25 @@ PyType_Slot PyClient::slots_[] = {
       .def(
           "compile",
           [](nb_class_ptr<PyClient> client, nb::bytes mlir_module,
-             jax::PyDeviceList& py_executable_devices, CompileOptions options,
-             std::vector<nb::capsule> host_callbacks) {
+             jax::PyDeviceList& py_executable_devices, CompileOptions options) {
             ifrt::DeviceListRef executable_devices =
                 ValueOrThrow(py_executable_devices.ifrt_device_list());
-            return ValueOrThrow(PyClient::CompileAndLoad(
+            return ValueOrThrow(PyClient::Compile(
                 std::move(client),
                 std::string(mlir_module.c_str(), mlir_module.size()),
-                std::move(executable_devices), std::move(options),
-                std::move(host_callbacks)));
-          },
-          nb::arg("computation"), nb::arg("executable_devices"),
-          nb::arg("compile_options") = CompileOptions(),
-          nb::arg("host_callbacks") = std::vector<nb::capsule>())
-      .def(
-          "compile",
-          [](nb_class_ptr<PyClient> client, nb::bytes mlir_module,
-             jax::PyDeviceList& py_executable_devices, CompileOptions options,
-             std::vector<nb::callable> host_callbacks) {
-            ifrt::DeviceListRef executable_devices =
-                ValueOrThrow(py_executable_devices.ifrt_device_list());
-            return ValueOrThrow(PyClient::CompileAndLoad(
-                std::move(client),
-                std::string(mlir_module.c_str(), mlir_module.size()),
-                std::move(executable_devices), std::move(options),
-                std::move(host_callbacks)));
-          },
-          nb::arg("computation"), nb::arg("executable_devices"),
-          nb::arg("compile_options") = CompileOptions(),
-          nb::arg("host_callbacks") = std::vector<nb::callable>())
-      .def(
-          "compile",
-          [](nb_class_ptr<PyClient> client, std::string mlir_module,
-             jax::PyDeviceList& py_executable_devices, CompileOptions options,
-             std::vector<nb::capsule> host_callbacks) {
-            ifrt::DeviceListRef executable_devices =
-                ValueOrThrow(py_executable_devices.ifrt_device_list());
-            return ValueOrThrow(PyClient::CompileAndLoad(
-                std::move(client), std::move(mlir_module),
-                std::move(executable_devices), std::move(options),
-                std::move(host_callbacks)));
-          },
-          nb::arg("computation"), nb::arg("executable_devices"),
-          nb::arg("compile_options") = CompileOptions(),
-          nb::arg("host_callbacks") = std::vector<nb::capsule>())
-      .def(
-          "compile",
-          [](nb_class_ptr<PyClient> client, std::string mlir_module,
-             jax::PyDeviceList& py_executable_devices, CompileOptions options,
-             std::vector<nb::callable> host_callbacks) {
-            ifrt::DeviceListRef executable_devices =
-                ValueOrThrow(py_executable_devices.ifrt_device_list());
-            return ValueOrThrow(PyClient::CompileAndLoad(
-                std::move(client), std::move(mlir_module),
-                std::move(executable_devices), std::move(options),
-                std::move(host_callbacks)));
-          },
-          nb::arg("computation"), nb::arg("executable_devices"),
-          nb::arg("compile_options") = CompileOptions(),
-          nb::arg("host_callbacks") = std::vector<nb::callable>())
-      // The following two overloads are for users of deprecated APIs who call
-      // `backend.compile` but do not have visibility to `DeviceList`.
-      .def(
-          "compile",
-          [](nb_class_ptr<PyClient> client, nb::bytes mlir_module,
-             nb::sequence& py_executable_devices, CompileOptions options) {
-            ifrt::DeviceListRef executable_devices =
-                ValueOrThrow(jax::PyDeviceList(nb::tuple(py_executable_devices))
-                                 .ifrt_device_list());
-            return ValueOrThrow(PyClient::CompileAndLoad(
-                std::move(client),
-                std::string(mlir_module.c_str(), mlir_module.size()),
-                std::move(executable_devices), std::move(options),
-                std::vector<nb::capsule>()));
+                std::move(executable_devices), std::move(options)));
           },
           nb::arg("computation"), nb::arg("executable_devices"),
           nb::arg("compile_options") = CompileOptions())
       .def(
           "compile",
           [](nb_class_ptr<PyClient> client, std::string mlir_module,
-             nb::sequence& py_executable_devices, CompileOptions options) {
+             jax::PyDeviceList& py_executable_devices, CompileOptions options) {
             ifrt::DeviceListRef executable_devices =
-                ValueOrThrow(jax::PyDeviceList(nb::tuple(py_executable_devices))
-                                 .ifrt_device_list());
-            return ValueOrThrow(PyClient::CompileAndLoad(
+                ValueOrThrow(py_executable_devices.ifrt_device_list());
+            return ValueOrThrow(PyClient::Compile(
                 std::move(client), std::move(mlir_module),
-                std::move(executable_devices), std::move(options),
-                std::vector<nb::capsule>()));
+                std::move(executable_devices), std::move(options)));
           },
           nb::arg("computation"), nb::arg("executable_devices"),
           nb::arg("compile_options") = CompileOptions())

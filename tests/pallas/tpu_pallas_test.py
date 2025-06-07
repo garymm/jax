@@ -477,7 +477,7 @@ class PallasCallScalarPrefetchTest(PallasBaseTest):
               ),
               grid=8,
           ),
-          compiler_params=pltpu.TPUCompilerParams(
+          compiler_params=pltpu.CompilerParams(
               allow_input_fusion=[False, True]
           ),
       )(s, x)
@@ -1913,12 +1913,12 @@ class PallasCallTest(PallasBaseTest):
       self.pallas_call(
           kernel,
           out_shape=x,
-          compiler_params=pltpu.TPUCompilerParams(vmem_limit_bytes=256),
+          compiler_params=pltpu.CompilerParams(vmem_limit_bytes=256),
       )(x)
     self.pallas_call(
         kernel,
         out_shape=x,
-        compiler_params=pltpu.TPUCompilerParams(vmem_limit_bytes=int(2**18)),
+        compiler_params=pltpu.CompilerParams(vmem_limit_bytes=int(2**18)),
     )(x)
 
   def test_allow_input_fusion(self):
@@ -1935,7 +1935,7 @@ class PallasCallTest(PallasBaseTest):
           in_specs=[pl.BlockSpec((1, 128, 128), lambda i: (i, 0, 0))],
           out_specs=pl.BlockSpec((1, 128, 128), lambda i: (i, 0, 0)),
           out_shape=x,
-          compiler_params=pltpu.TPUCompilerParams(allow_input_fusion=[True]),
+          compiler_params=pltpu.CompilerParams(allow_input_fusion=[True]),
       )(z)
 
     x = jnp.arange(np.prod(shape), dtype=np.float32).reshape(shape)
@@ -1963,7 +1963,7 @@ class PallasCallTest(PallasBaseTest):
       self.pallas_call(
           kernel,
           out_shape=jax.ShapeDtypeStruct(shape, jnp.float32),
-          compiler_params=pltpu.TPUCompilerParams(
+          compiler_params=pltpu.CompilerParams(
               internal_scratch_in_bytes=requested_bytes,
           ),
       )(x)
@@ -2084,6 +2084,39 @@ class PallasCallTest(PallasBaseTest):
     expected = jnp.full(shape, -1, dtype=dtype)
     expected = expected.at[slices].set(x[slices])
     np.testing.assert_array_equal(out, expected)
+
+  def test_custom_vjp(self):
+
+    @jax.custom_vjp
+    def f(x):
+      return jnp.tanh(x)
+    def f_fwd(x):
+      return jnp.tanh(x) * 2, ()
+    def f_bwd(_, g):
+      return (g * 2,)
+
+    f.defvjp(f_fwd, f_bwd)
+
+    def kernel(x_ref, dy_ref, y_ref, y_p_ref, dx_ref):
+      x = x_ref[...]
+      y_ref[...] = f(x)
+      y_p, f_vjp = jax.vjp(f, x)
+      y_p_ref[...] = y_p
+      dx_ref[...] = f_vjp(dy_ref[...])[0]
+
+    x = jax.random.normal(jax.random.key(0), (8, 128), dtype=jnp.float32)
+    dy = jax.random.normal(jax.random.key(1), (8, 128), dtype=jnp.float32)
+    y, y_p, dx = pl.pallas_call(
+        kernel,
+        out_shape=(
+            jax.ShapeDtypeStruct((8, 128), jnp.float32),
+            jax.ShapeDtypeStruct((8, 128), jnp.float32),
+            jax.ShapeDtypeStruct((8, 128), jnp.float32),
+        ),
+    )(x, dy)
+    np.testing.assert_array_equal(y, f(x))
+    np.testing.assert_array_equal(y_p, f(x) * 2)
+    np.testing.assert_array_equal(dx, dy * 2)
 
 
 class PallasUXTest(PallasBaseTest):

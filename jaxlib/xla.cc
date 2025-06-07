@@ -95,6 +95,7 @@ limitations under the License.
 #include "jaxlib/jax_jit.h"
 #include "jaxlib/mlir.h"
 #include "jaxlib/nb_class_ptr.h"
+#include "jaxlib/partition_spec.h"
 #include "jaxlib/pjit.h"
 #include "jaxlib/pmap_lib.h"
 #include "jaxlib/py_array.h"
@@ -490,27 +491,8 @@ NB_MODULE(_jax, m) {
               &CompiledMemoryStats::host_temp_size_in_bytes)
       .def_prop_ro("serialized_buffer_assignment_proto",
                    [](const CompiledMemoryStats& cms) -> nb::bytes {
-#if JAX_IFRT_VERSION_NUMBER >= 9
                      const std::string& s = cms.serialized_buffer_assignment;
                      return nb::bytes(s.data(), s.size());
-#elif JAX_IFRT_VERSION_NUMBER >= 7
-                     if (cms.buffer_assignment.has_value()) {
-                       std::string s =
-                           cms.buffer_assignment->SerializeAsString();
-                       return nb::bytes(s.data(), s.size());
-                     } else {
-                       return nb::bytes();
-                     }
-#else
-                     xla::HloProto hlo;
-                     if (!cms.serialized_hlo_proto.empty() &&
-                         hlo.ParseFromString(cms.serialized_hlo_proto)) {
-                       std::string s =
-                           hlo.buffer_assignment().SerializeAsString();
-                       return nb::bytes(s.data(), s.size());
-                     }
-                     return nb::bytes();
-#endif
                    })
       .def("__str__", &CompiledMemoryStats::DebugString);
 
@@ -913,24 +895,24 @@ NB_MODULE(_jax, m) {
                  absl::StrCat("Unknown attribute ", name).c_str());
            });
 
-  nb::class_<ifrt::Executable>(m, "Executable")
-      .def("hlo_modules", ValueOrThrowWrapper(&ifrt::Executable::GetHloModules))
+  nb::class_<PyExecutable>(m, "Executable")
+      .def("hlo_modules", ValueOrThrowWrapper(&PyExecutable::GetHloModules))
       .def("get_output_memory_kinds",
-           xla::ValueOrThrowWrapper(&ifrt::Executable::GetOutputMemoryKinds))
-      .def("get_output_shardings", &ifrt::Executable::GetOutputShardings)
+           xla::ValueOrThrowWrapper(&PyExecutable::GetOutputMemoryKinds))
+      .def("get_output_shardings", &PyExecutable::GetOutputShardings)
       .def("get_parameter_layouts",
-           ValueOrThrowWrapper(&ifrt::Executable::GetParameterLayouts))
+           ValueOrThrowWrapper(&PyExecutable::GetParameterLayouts))
       .def("get_output_layouts",
-           xla::ValueOrThrowWrapper(&ifrt::Executable::GetOutputLayouts))
-      .def("get_parameter_shardings", &ifrt::Executable::GetParameterShardings)
+           xla::ValueOrThrowWrapper(&PyExecutable::GetOutputLayouts))
+      .def("get_parameter_shardings", &PyExecutable::GetParameterShardings)
       .def("get_compiled_memory_stats",
-           xla::ValueOrThrowWrapper(&ifrt::Executable::GetCompiledMemoryStats))
+           xla::ValueOrThrowWrapper(&PyExecutable::GetCompiledMemoryStats))
       .def("serialize",
-           [](const ifrt::Executable& exec) -> nb::bytes {
+           [](const PyExecutable& exec) -> nb::bytes {
              std::string serialized = ValueOrThrow(exec.Serialize());
              return nb::bytes(serialized.data(), serialized.size());
            })
-      .def("cost_analysis", [](const ifrt::Executable& exec) {
+      .def("cost_analysis", [](const PyExecutable& exec) {
         auto attrs = ValueOrThrow(exec.GetCostAnalysis());
         return ifrt::ToPjRtAttributeMap(std::move(attrs));
       });
@@ -982,6 +964,7 @@ NB_MODULE(_jax, m) {
   m.def("get_internal_device_put_info",
         []() { return DevicePutInfo::GetInfo(); });
 
+  jax::PartitionSpec::Register(m);
 }  // NOLINT(readability/fn_size)
 
 }  // namespace xla

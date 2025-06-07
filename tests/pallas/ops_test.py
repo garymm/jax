@@ -292,7 +292,7 @@ class PallasBaseTest(jtu.JaxTestCase):
   def pallas_call(cls, *args, **kwargs):
     if jtu.test_device_matches(["cuda"]) and use_mosaic_gpu:
       assert plgpu_mgpu is not None
-      compiler_params = plgpu_mgpu.GPUCompilerParams(
+      compiler_params = plgpu_mgpu.CompilerParams(
           lowering_semantics=plgpu_mgpu.LoweringSemantics.Warpgroup
       )
       kwargs["compiler_params"] = compiler_params
@@ -300,7 +300,7 @@ class PallasBaseTest(jtu.JaxTestCase):
     return pl.pallas_call(*args, interpret=cls.INTERPRET, **kwargs)
 
   def skip_if_mosaic_gpu(self):
-    if jtu.test_device_matches(["cuda"]) and use_mosaic_gpu:
+    if jtu.test_device_matches(["gpu"]) and use_mosaic_gpu:
       self.skipTest("TODO: Mosaic GPU does not support this yet")
 
 
@@ -1646,7 +1646,7 @@ class OpsTest(PallasBaseTest):
 
   @unittest.skipIf(
       sys.platform == "win32",
-      "plgpu_triton.TritonCompilerParams unavailable on Windows",
+      "plgpu_triton.CompilerParams unavailable on Windows",
   )
   def test_debug_print(self):
     self.skip_if_mosaic_gpu()
@@ -1661,7 +1661,7 @@ class OpsTest(PallasBaseTest):
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
-        compiler_params=plgpu_triton.TritonCompilerParams(
+        compiler_params=plgpu_triton.CompilerParams(
             num_warps=1, num_stages=1
         ),
     )
@@ -1677,7 +1677,7 @@ class OpsTest(PallasBaseTest):
 
   @unittest.skipIf(
       sys.platform == "win32",
-      "plgpu_triton.TritonCompilerParams unavailable on Windows",
+      "plgpu_triton.CompilerParams unavailable on Windows",
   )
   def test_debug_print_with_values(self):
     if jtu.test_device_matches(["tpu"]):
@@ -1690,7 +1690,7 @@ class OpsTest(PallasBaseTest):
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
-        compiler_params=plgpu_triton.TritonCompilerParams(
+        compiler_params=plgpu_triton.CompilerParams(
             num_warps=1, num_stages=1
         ),
     )
@@ -1822,30 +1822,49 @@ class OpsTest(PallasBaseTest):
         np.testing.assert_allclose(out[oi], x[ii])
         np.testing.assert_allclose(out[oi + 1 :], jnp.zeros_like(out[oi + 1 :]))
 
-  @parameterized.parameters(
-      ((), (2,), ()),
-      ((1,), (2,), (0,)),
-      ((1, 1), (2, 2), (0, 1)),
-      ((), (2, 2), ()),
+  @parameterized.product(
+      shape_spec=[
+          ((), (2,), ()),
+          ((1,), (2,), (0,)),
+          ((1, 128), (8, 128), (0, 1)),  # row broadcasting
+          ((), (2, 2), ()),
+      ],
+      dtype=[jnp.int32, jnp.int16, jnp.int8, jnp.bool_],
   )
-  def test_broadcast_in_dim(self, in_shape, out_shape, dims):
+  def test_broadcast_in_dim(self, shape_spec, dtype):
     self.skip_if_mosaic_gpu()
 
-    # The Pallas TPU lowering currently supports only blocks of rank >= 1
+    in_shape, out_shape, dims = shape_spec
     if jtu.test_device_matches(["tpu"]):
-      self.skipTest("Not supported on TPU")
+      if not in_shape:
+        self.skipTest(
+            "The Pallas TPU lowering currently supports only blocks of rank"
+            " >= 1"
+        )
+      if dtype is jnp.bool_ and not jtu.if_cloud_tpu_at_least(2025, 6, 5):
+        self.skipTest("Requires libtpu built after 2025-06-05")
+      if (
+          len(in_shape) == 1
+          and len(out_shape) == 1
+          and dtype not in {jnp.int32, jnp.bool_}
+      ):
+        self.skipTest("Unsupported tiling")
 
     @functools.partial(
         self.pallas_call,
-        out_shape=jax.ShapeDtypeStruct(out_shape, jnp.float32),
+        out_shape=jax.ShapeDtypeStruct(out_shape, dtype),
     )
     def f(x_ref, o_ref):
       x = x_ref[...]
       o_ref[...] = jax.lax.broadcast_in_dim(x, out_shape, dims)
 
-    x = jnp.arange(int(np.prod(in_shape)), dtype=jnp.float32).reshape(in_shape)
+    x = (
+        jnp.arange(math.prod(in_shape), dtype=jnp.int32)
+        .reshape(in_shape)
+        .astype(dtype)
+    )
     expected = jax.lax.broadcast_in_dim(x, out_shape, dims)
-    np.testing.assert_allclose(f(x), expected)
+    np.testing.assert_array_equal(f(x), expected)
 
   @parameterized.product(
       lhs_and_rhs_shape=[
@@ -2568,6 +2587,52 @@ class OpsTest(PallasBaseTest):
         kernel, out_shape=jax.ShapeDtypeStruct((n,), jnp.float32)
     )(x)
     np.testing.assert_array_equal(out, np.diagonal(x))
+
+  @parameterized.product(
+      # Skip some steps to just run less cases
+      # TODO(mvoz): Hypothesis?
+      x_dim_size=tuple(8 * i for i in range(1, 5)),
+      y_dim_size=tuple(8 * i for i in range(1, 5)),
+      z_dim_size=tuple(128 * i for i in range(1, 3)),
+      dtype=(jnp.float32,),
+  )
+  def test_jnp_swapaxes_major_minor(
+      self, x_dim_size, y_dim_size, z_dim_size, dtype
+  ):
+    if jtu.test_device_matches(["gpu"]):
+      if any(
+          not is_power_of_two(x) for x in [x_dim_size, y_dim_size, z_dim_size]
+      ):
+        self.skipTest(
+            "the Pallas Triton lowering currently requires that all operations"
+            " have array arguments and results whose size is a power of 2."
+            f" Encountered an array of shape ({x_dim_size}, {y_dim_size},"
+            f" {z_dim_size})"
+        )
+      if x_dim_size * y_dim_size * z_dim_size * 4 > 32768:
+        self.skipTest(
+            "Mosaic GPU kernel exceeds available shared memory"
+            f" smem_bytes={x_dim_size * y_dim_size * z_dim_size * 4} > 32768"
+        )
+    self.skip_if_mosaic_gpu()
+    if not jtu.if_cloud_tpu_at_least(2025, 5, 22):
+      self.skipTest("Requires libtpu built after 2025-5-22")
+
+    x = jnp.arange(x_dim_size * y_dim_size * z_dim_size, dtype=dtype).reshape(
+        (x_dim_size, y_dim_size, z_dim_size)
+    )
+
+    def kernel(x_ref, out_ref):
+      out_ref[...] = jnp.swapaxes(x_ref[...], 0, 1)
+
+    out = self.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct(
+            (y_dim_size, x_dim_size, z_dim_size), dtype
+        ),
+    )(x)
+    expected = jnp.swapaxes(x, 0, 1)
+    np.testing.assert_array_equal(out, expected)
 
 
 class OpsInterpretTest(OpsTest):

@@ -28,6 +28,7 @@ from jax._src import dispatch
 from jax._src import op_shardings
 from jax._src import test_util as jtu
 from jax._src import xla_bridge as xb
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir import dialects, ir
 from jax._src.util import safe_zip
@@ -710,6 +711,13 @@ class JaxArrayTest(jtu.JaxTestCase):
     out = multihost_utils.process_allgather(x)
     self.assertEqual(out.shape, (1, x.shape[0]))
     self.assertArraysEqual(out, np.expand_dims(x, axis=0))
+
+  def test_broadcast_one_to_all_single_host(self):
+    x = jnp.arange(8, dtype=jnp.uint8)
+    out = multihost_utils.broadcast_one_to_all(x)
+    self.assertEqual(out.shape, x.shape)
+    self.assertEqual(out.dtype, x.dtype)
+    self.assertArraysEqual(out, x)
 
   @jtu.sample_product(
     dtype=jtu.dtypes.all,
@@ -1404,67 +1412,116 @@ class ShardingTest(jtu.JaxTestCase):
       NamedSharding(abstract_mesh, P(), memory_kind='weird_device')
 
   def test_pspec_unreduced(self):
-    pspec1 = P('a', 'b', None, unreduced=('c',))
+    pspec1 = P('a', 'b', None, unreduced={'c'})
     self.assertEqual(repr(pspec1),
-                     "PartitionSpec('a', 'b', None, unreduced=('c',))")
+                     "PartitionSpec('a', 'b', None, unreduced={'c'})")
 
-    pspec2 = P('a', 'b', None, unreduced=('c',))
+    pspec2 = P('a', 'b', None, unreduced={'c'})
     self.assertEqual(pspec1, pspec2)
 
-    pspec3 = P('a', 'b', None, unreduced=('d',))
+    pspec3 = P('a', 'b', None, unreduced={'d'})
     self.assertNotEqual(pspec1, pspec3)
 
-    out = P('x', unreduced=('z',)) + P('a', unreduced='b')
-    self.assertEqual(out, P('x', 'a', unreduced=('z', 'b')))
+    out = P('x', unreduced={'z'}) + P('a', unreduced={'b'})
+    self.assertEqual(out, P('x', 'a', unreduced={'z', 'b'}))
 
-    pspec4 = P('x', unreduced='y')
+    pspec4 = P('x', unreduced={'y'})
     self.assertEqual(repr(pspec4),
-                     "PartitionSpec('x', unreduced=('y',))")
+                     "PartitionSpec('x', unreduced={'y'})")
 
-    pspec5 = P(None, None, unreduced='x')
+    pspec5 = P(None, None, unreduced={'x'})
     self.assertEqual(repr(pspec5),
-                     "PartitionSpec(None, None, unreduced=('x',))")
+                     "PartitionSpec(None, None, unreduced={'x'})")
 
-    pspec6 = P(None, unreduced='x')
-    self.assertEqual(repr(pspec6), "PartitionSpec(None, unreduced=('x',))")
+    pspec6 = P(None, unreduced={'x'})
+    self.assertEqual(repr(pspec6), "PartitionSpec(None, unreduced={'x'})")
 
-    pspec7 = P(unreduced='x')
-    self.assertEqual(repr(pspec7), "PartitionSpec(unreduced=('x',))")
+    pspec7 = P(unreduced={'x'})
+    self.assertEqual(repr(pspec7), "PartitionSpec(unreduced={'x'})")
 
     with self.assertRaisesRegex(
         TypeError, 'unreduced in `__add__` of PartitionSpec'):
-      P('x', unreduced=('z',)) + (None,) * 2
+      P('x', unreduced={'z'}) + (None,) * 2
 
     with self.assertRaisesRegex(
         TypeError, "unreduced in `__radd__` of PartitionSpec"):
-      (None,) * 2 + P('x', unreduced='y')
+      (None,) * 2 + P('x', unreduced={'y'})
 
     with self.assertRaisesRegex(
         ValueError, "partitions cannot overlap with unreduced"):
-      P('x', 'y', unreduced='x')
+      P('x', 'y', unreduced={'x'})
 
     with self.assertRaisesRegex(
         ValueError, "partitions cannot overlap with unreduced"):
-      P('x', None, 'y', unreduced=('z', 'y'))
+      P('x', None, 'y', unreduced={'z', 'y'})
 
   def test_named_sharding_unreduced_error(self):
     mesh = jtu.create_mesh((1, 1, 1), ('x', 'y', 'z'))
 
     with self.assertRaisesRegex(
         ValueError, "Unreduced axes.*not found in mesh.*"):
-      NamedSharding(mesh, P('x', unreduced='a'))
-
-    with self.assertRaisesRegex(
-        ValueError, "Unreduced.*has duplicate entries"):
-      NamedSharding(mesh, P('x', unreduced=('y', 'y')))
+      NamedSharding(mesh, P('x', unreduced={'a'}))
 
     with self.assertRaisesRegex(
         ValueError, "Unreduced axes can only refer to mesh axes.*Explicit"):
-      NamedSharding(mesh, P('x', unreduced=('y', 'z')))
+      NamedSharding(mesh, P('x', unreduced={'y', 'z'}))
 
     with self.assertRaisesRegex(
         ValueError, "unreduced cannot contain None.*"):
-      NamedSharding(mesh, P('x', unreduced=('y', None)))
+      NamedSharding(mesh, P('x', unreduced={'y', None}))
+
+  def test_hlo_sharding_get_axis_sizes(self):
+    if jaxlib_extension_version < 343:
+      self.skipTest('Requires jaxlib_extension_version >= 343')
+
+    op = xc.OpSharding()
+    op.type = xc.OpSharding.Type.OTHER
+    op.tile_assignment_dimensions = [6, 35]
+    op.iota_reshape_dims = [7, 10, 3]
+    op.iota_transpose_perm = [2, 1, 0]
+    s = GSPMDSharding(jax.devices(), op)
+    self.assertIn('{devices=[6,35]<=[7,10,3]T(2,1,0)}', repr(s))
+    self.assertEqual(s._to_xla_hlo_sharding(2).get_axis_sizes(), [7, 2, 5, 3])
+
+  @parameterized.named_parameters(
+      ('2d_mesh_x_y', (4, 2), P('x', 'y')),
+      ('2d_mesh_x', (4, 2), P('x')),
+      ('2d_mesh_y', (4, 2), P('y')),
+      ('2d_mesh_none_y', (4, 2), P(None, 'y')),
+      ('2d_mesh_none_x', (4, 2), P(None, 'x')),
+      ('2d_mesh_xy', (4, 2), P(('x', 'y'))),
+      ('2d_mesh_none_xy', (4, 2), P(None, ('x', 'y'))),
+      ('2d_mesh_fully_replicated', (4, 2), P()),
+      ('2d_mesh_x_none', (2, 1), P(('x',), None)),
+      ('3d_mesh_none_none_z', (2, 2, 2), P(None, None, 'z')),
+      ('3d_mesh_none_y_none', (2, 2, 2), P(None, 'y', None)),
+      ('3d_mesh_x_y_none', (2, 2, 2), P('x', 'y', None)),
+      ('3d_mesh_none_yz', (2, 2, 2), P(None, ('y', 'z'))),
+      ('3d_mesh_x_none_yz', (2, 2, 2), P('x', None, ('y', 'z'))),
+      ('3d_mesh_none_x_yz', (2, 2, 2), P(None, 'x', ('y', 'z'))),
+      ('3d_mesh_xy_z', (2, 2, 2), P(('x', 'y'), 'z')),
+      ('3d_mesh_xy_none_z', (2, 2, 2), P(('x', 'y'), None, 'z')),
+      ('3d_mesh_x_y_z', (2, 2, 2), P('x', 'y', 'z')),
+      ('3d_mesh_xz_y', (2, 2, 2), P(('x', 'z'), 'y')),
+      ('3d_mesh_xz_none_y', (2, 2, 2), P(('x', 'z'), None, 'y')),
+      ('3d_mesh_y_none_xz', (2, 2, 2), P('y', None, ('x', 'z'))),
+      ('3d_mesh_none_y_xz', (2, 2, 2), P(None, 'y', ('x', 'z'))),
+      ('3d_mesh2_none_none_z', (1, 2, 4), P(None, None, 'z')),
+      ('3d_mesh2_x_none_none', (1, 2, 4), P('x', None, None)),
+      ('3d_mesh_x_none_none', (2, 1, 1), P('x', None, None)),
+  )
+  def test_gspmd_sharding_shardy_lowering(self, mesh_shape, pspec):
+    if jaxlib_extension_version < 344:
+      self.skipTest('Requires jaxlib_extension_version >= 344')
+
+    ndim = len(mesh_shape)
+    mesh = jtu.create_mesh(
+        mesh_shape, ('x', 'y') if ndim == 2 else ('x', 'y', 'z')
+    )
+    ns = jax.sharding.NamedSharding(mesh, pspec)
+    gs = GSPMDSharding(ns._device_assignment, ns._to_xla_hlo_sharding(ndim))
+    out_sdy_sharding = gs._to_sdy_sharding(ndim)
+    self.assertTrue(out_sdy_sharding, ns._to_sdy_sharding(ndim))
 
 
 @jtu.with_config(jax_use_shardy_partitioner=True)

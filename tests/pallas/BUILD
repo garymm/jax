@@ -558,6 +558,7 @@ jax_multiplatform_test(
     disable_configs = ["cpu_shardy"],
     enable_backends = ["cpu"],
     deps = [
+        "//jax:experimental",
         "//jax:pallas",
         "//jax:pallas_tpu",
     ] + py_deps([
@@ -749,6 +750,24 @@ jax_multiplatform_test(
 )
 
 jax_multiplatform_test(
+    name = "triton_pallas_test",
+    srcs = [
+        "triton_pallas_test.py",
+    ],
+    enable_backends = ["cpu"],
+    enable_configs = [
+        "gpu_h100_x32",
+    ],
+    shard_count = 1,
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_gpu",
+    ] + py_deps([
+        "absl/testing",
+    ]),
+)
+
+jax_multiplatform_test(
     name = "mgpu_attention_run",
     srcs = ["//jax/experimental/pallas/ops/gpu:attention_mgpu.py"],
     enable_backends = [],
@@ -785,6 +804,116 @@ jax_multiplatform_test(
         "absl/testing",
         "numpy",
     ]),
+)
+
+jax_multiplatform_test(
+    name = "mgpu_matmul_test",
+    srcs = ["mgpu_matmul_test.py"],
+    enable_backends = [],
+    enable_configs = ["gpu_b200"],
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    shard_count = 8,
+    tags = [
+        # TODO(b/330364373): Remove when B200 is fully supported.
+        "notap",
+    ],
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_experimental_gpu_ops",
+        "//jax:pallas_mosaic_gpu",
+    ] + py_deps([
+        "absl/testing",
+        "numpy",
+    ]),
+)
+
+jax_multiplatform_test(
+    name = "blackwell_matmul_mgpu_run",
+    srcs = ["//jax/experimental/pallas/ops/gpu:blackwell_matmul_mgpu.py"],
+    enable_backends = [],
+    enable_configs = ["gpu_b200"],
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    tags = [
+        "manual",
+        "notap",
+    ],
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_mosaic_gpu",
+    ] + py_deps([
+        "absl/testing",
+        "numpy",
+    ]),
+)
+
+jax_multiplatform_test(
+    name = "mgpu_ragged_dot_run",
+    srcs = ["//jax/experimental/pallas/ops/gpu:ragged_dot_mgpu.py"],
+    enable_backends = [],
+    enable_configs = [
+        "gpu_h100_x32",
+        "gpu_h100",
+    ],
+    env = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"},
+    tags = [
+        "manual",
+        "notap",
+    ],
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_mosaic_gpu",
+    ] + py_deps("absl/testing") + py_deps("numpy"),
+)
+
+jax_multiplatform_test(
+    name = "mgpu_ragged_dot_test",
+    srcs = ["mgpu_ragged_dot_test.py"],
+    enable_backends = [],
+    enable_configs = [
+        "gpu_h100",
+    ],
+    shard_count = 12,
+    tags = [
+        "noasan",  # Times out.
+    ],
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_experimental_gpu_ops",
+        "//jax:pallas_mosaic_gpu",
+    ] + py_deps([
+        "absl/testing",
+        "numpy",
+    ]),
+)
+
+jax_multiplatform_test(
+    name = "mgpu_collective_matmul_test",
+    srcs = ["mgpu_collective_matmul_test.py"],
+    args = [
+        "--num_processes=2",
+        "--gpus_per_process=1",
+    ],
+    enable_backends = [],
+    enable_configs = [
+        "gpu_h100x2",
+    ],
+    env = {
+        "XLA_FLAGS": "--xla_gpu_experimental_enable_nvshmem=true",
+        "JAX_PALLAS_USE_MOSAIC_GPU": "1",
+    },
+    shard_count = 4,
+    tags = [
+        "manual",
+        "multiaccelerator",
+        "notap",
+    ],
+    deps = [
+        "//jax:experimental",
+        "//jax:pallas",
+        "//jax:pallas_experimental_gpu_ops",
+        "//jax:pallas_mosaic_gpu",
+        "//jax:test_multiprocess",
+    ] + py_deps("absl/testing") + py_deps("numpy"),
 )
 
 jax_multiplatform_test(

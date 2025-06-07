@@ -706,7 +706,7 @@ class ModuleContext:
   # Cached primitive lowerings.
   cached_primitive_lowerings: dict[Any, func_dialect.FuncOp]
 
-  # Cached traceback infromation.
+  # Cached traceback information.
   traceback_caches: TracebackCaches
 
   lowering_parameters: LoweringParameters
@@ -2731,7 +2731,7 @@ def lower_with_sharding_in_types(ctx, op, aval, sharding_proto=None):
 
 
 def set_sharding(op, sharding: xc.OpSharding | SdyArray | SdyArrayList):
-  if config.use_shardy_partitioner.value:
+  if isinstance(sharding, (SdyArray, SdyArrayList)):
     op.attributes["sdy.sharding"] = get_sharding_attr(sharding)
   else:
     op.attributes["mhlo.sharding"] = get_sharding_attr(sharding)
@@ -2740,7 +2740,7 @@ def set_sharding(op, sharding: xc.OpSharding | SdyArray | SdyArrayList):
 def get_sharding_attr(
     sharding: xc.OpSharding | SdyArray | SdyArrayList
 ) -> ir.Attribute:
-  if config.use_shardy_partitioner.value:
+  if isinstance(sharding, (SdyArray, SdyArrayList)):
     return sharding.build()  # type: ignore
   else:
     # If there are very large numbers of devices, use the proto representation.

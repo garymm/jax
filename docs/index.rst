@@ -108,7 +108,7 @@ numerical computing tools; the following is just a small sample of what is out t
 
     .. grid-item:: :material-regular:`bar_chart;2em` **Probabilistic modeling**
 
-       - `TensorFlow Probabilty`_
+       - `TensorFlow Probability`_
        - Distrax_
 
     .. grid-item:: :material-outlined:`animation;2em` **Physics & simulation**
@@ -122,6 +122,7 @@ numerical computing tools; the following is just a small sample of what is out t
        - AXLearn_
        - Levanter_
        - EasyLM_
+       - Marin_
 
 
 Many more JAX-based libraries have been developed; the community-run `Awesome JAX`_ page
@@ -189,6 +190,7 @@ maintains an up-to-date list.
 .. _JAX AI Stack Examples: https://docs.jaxstack.ai/en/latest/examples.html
 .. _Keras: https://keras.io/
 .. _Levanter: https://github.com/stanford-crfm/levanter
+.. _Marin: https://github.com/marin-community/marin
 .. _Lineax: https://github.com/patrick-kidger/lineax
 .. _MaxText: https://github.com/google/maxtext/
 .. _Numpyro: https://num.pyro.ai/en/latest/index.html
@@ -197,4 +199,4 @@ maintains an up-to-date list.
 .. _Orbax: https://orbax.readthedocs.io/
 .. _PyMC: https://www.pymc.io/
 .. _TensorFlow Datasets: https://www.tensorflow.org/datasets
-.. _TensorFlow Probabilty: https://www.tensorflow.org/probability
+.. _TensorFlow Probability: https://www.tensorflow.org/probability

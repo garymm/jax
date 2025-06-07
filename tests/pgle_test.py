@@ -85,7 +85,7 @@ class PgleTest(jtu.JaxTestCase):
     pgle_profiler = profiler.PGLEProfiler(1, 90)
     with config.enable_pgle(False):
       with profiler.PGLEProfiler.trace(pgle_profiler):
-        compiled(x, y)
+        jax.block_until_ready(compiled(x, y))
 
     fdo_profile = pgle_profiler.consume_fdo_profile()
     self.assertIsNotNone(fdo_profile)
@@ -157,29 +157,31 @@ class PgleTest(jtu.JaxTestCase):
 
       with config.pgle_profiling_runs(2), config.enable_pgle(True):
         # Run 1: Module should be compiled without FDO. Two modules are expected
-        # One is the funtion f, the other one is multi slice module
-        with jtu.count_jit_compilation_cache_miss() as cache_miss_count:
+        # One is the function f, the other one is multi slice module
+        with jtu.count_pjit_cpp_cache_miss() as cache_miss_count:
           self.assertArraysEqual(f(x), expected)
         self.assertEqual(cache_miss_count(), 2)
 
         # Run 2: Second PGLE run. Profile should be empty.
-        with jtu.count_jit_compilation_cache_miss() as cache_miss_count:
+        with jtu.count_pjit_cpp_cache_miss() as cache_miss_count:
           self.assertArraysEqual(f(x), expected)
         self.assertEqual(cache_miss_count(), 2)
         fdo_profiles_before_pgle = self.get_fdo_profiles(dump_dir)
-        # One for before and one for after optimization.
-        self.assertLen(fdo_profiles_before_pgle, 2)
+        # One for before optimizatiom, one after SPMD partitioning, and one
+        # after optimization.
+        self.assertLen(fdo_profiles_before_pgle, 3)
         # The FDO profile file should be empty.
         self.assertEqual(
             os.path.getsize(os.path.join(dump_dir, fdo_profiles_before_pgle[0])), 0)
 
         # Run 3: The module should be recompiled with FDO profiles
-        with jtu.count_jit_compilation_cache_miss() as cache_miss_count:
+        with jtu.count_pjit_cpp_cache_miss() as cache_miss_count:
           self.assertArraysEqual(f(x), expected)
         self.assertEqual(cache_miss_count(), 2)
         fdo_profiles_after_pgle = self.get_fdo_profiles(dump_dir)
-        # One for before and one for after optimization.
-        self.assertLen(fdo_profiles_after_pgle, 4)
+        # One more before optimizatiom, one more after SPMD partitioning, and
+        # one more after optimization.
+        self.assertLen(fdo_profiles_after_pgle, 6)
 
         for fdo_profile in fdo_profiles_after_pgle:
           if fdo_profile not in fdo_profiles_before_pgle:
@@ -188,7 +190,7 @@ class PgleTest(jtu.JaxTestCase):
             )
 
         # Run 4: Fast-path should be used after PGLE is done
-        with jtu.count_jit_compilation_cache_miss() as cache_miss_count:
+        with jtu.count_pjit_cpp_cache_miss() as cache_miss_count:
           self.assertArraysEqual(f(x), expected)
         self.assertLess(cache_miss_count(), 2)
 

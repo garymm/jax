@@ -70,7 +70,7 @@ from jax._src.sharding_impls import (PmapSharding, NamedSharding,
                                      ShardingContext, SPMDAxisContext,
                                      PartitionSpec as P, canonicalize_sharding)
 from jax._src.typing import Array, ArrayLike, DimSize, DuckTypedArray, DTypeLike, Shape
-from jax._src.util import (NumpyComplexWarning, cache, canonicalize_axis,
+from jax._src.util import (cache, canonicalize_axis,
                            safe_map, safe_zip, split_list, weakref_lru_cache,
                            foreach)
 
@@ -935,7 +935,7 @@ def integer_pow(x: ArrayLike, y: int) -> Array:
     An array of the same shape and dtype as ``x`` containing the elementwise power.
 
   See also:
-    :func:`jax.lax.pow`: Elementwise pwoer where ``y`` is an array.
+    :func:`jax.lax.pow`: Elementwise power where ``y`` is an array.
 
   .. _stablehlo.multiply: https://openxla.org/stablehlo/spec#multiply
   """
@@ -1706,7 +1706,7 @@ def _convert_element_type(
       dtypes.issubdtype(old_dtype, np.complexfloating) and
       not dtypes.issubdtype(new_dtype, np.complexfloating)):
     msg = "Casting complex values to real discards the imaginary part"
-    warnings.warn(msg, NumpyComplexWarning, stacklevel=2)
+    warnings.warn(msg, np.exceptions.ComplexWarning, stacklevel=2)
 
   # Python has big integers, but convert_element_type(2 ** 100, np.float32) need
   # not be an error since the target dtype fits the value. Handle this case by
@@ -2102,7 +2102,7 @@ class DotAlgorithm(NamedTuple):
 
   The `StableHLO spec <https://openxla.org/stablehlo/spec#dot_general>`_ for
   the dot operation doesn't require that the precision types be the same as the
-  storage types for the inputs or outputs, but some plaforms may require that
+  storage types for the inputs or outputs, but some platforms may require that
   these types match. Furthermore, the return type of
   :func:`~jax.lax.dot_general` is always defined by the ``accumulation_type``
   parameter of the input algorithm, if specified.
@@ -3564,12 +3564,13 @@ def full_like(x: ArrayLike | DuckTypedArray,
         # This bypasses the check.
         and not isinstance(x, core.Tracer)
         and hasattr(x, 'sharding')
+        and x.sharding is not None
+        and x.sharding._is_concrete
         and getattr(x, '_committed', True)
         and not weak_type
         and fill_shape == np.shape(x)  # type: ignore[arg-type]
     )
     if use_x_sharding:
-      # TODO(yashkatariya): Use shard_alike in tracing_mode once it is supported.
       sharding = x.sharding  # type: ignore
   val = full(fill_shape, _convert_element_type(fill_value, dtype, weak_type),
              sharding=sharding)
@@ -4950,6 +4951,9 @@ def _to_edtype_abstract_eval(x, *, edtype):
           not isinstance(x.dtype, dtypes.ExtendedDType))
   # For backward compatibility, if the edtype rules have a `convert_to` method,
   # use that rather than looking for an `allow_conversion: bool` attribute.
+  if not isinstance(x, (ShapedArray, core.DShapedArray)):
+    raise TypeError("can only convert to an extended dtype on an array type,"
+                    f"but got {type(x)}")
   if convert_to := getattr(edtype._rules, 'convert_to', None):
     allow_conversion = convert_to(x.dtype, edtype)
   else:
@@ -4959,6 +4963,7 @@ def _to_edtype_abstract_eval(x, *, edtype):
         f"Cannot convert_element_type from {dtype_to_string(x.dtype)} "
         f"to {dtype_to_string(edtype)}")
   rep_aval = core.physical_element_aval(edtype)
+  assert tuple(rep_aval.sharding.spec) == (None,) * rep_aval.ndim
   if x.dtype != rep_aval.dtype:
     raise ValueError(
         "can only convert to extended dtype from its representation dtype, "
@@ -4981,7 +4986,20 @@ def _to_edtype_abstract_eval(x, *, edtype):
         f" has a representation shape {rep_aval.shape} while the given "
         f"representation array has shape {x.shape}, so the shape suffix "
         f"does not match: given {shape_suffix} but required {rep_aval.shape}.")
-  return x.update(shape=shape_prefix, dtype=edtype)
+  if isinstance(x, ShapedArray):
+    spec_prefix, spec_suffix = x.sharding.spec[:n], x.sharding.spec[n:]
+    if tuple(spec_suffix) != (None,) * len(spec_suffix):
+      raise ValueError(
+          "can only convert to extended dtype from an array with trailing "
+          "axes that are not explicitly sharded, but tried to convert from "
+          f"{x.str_short(short_dtypes=True)} to an extended dtype with element "
+          f"shape {rep_aval.shape}")
+    return x.update(shape=shape_prefix, dtype=edtype,
+                    sharding=x.sharding.with_spec(spec_prefix))
+  elif isinstance(x, core.DShapedArray):
+    return x.update(shape=shape_prefix, dtype=edtype)
+  else:
+    assert False  # unreachable, see isinstance check above
 
 to_edtype_p = Primitive('to_edtype')
 to_edtype_p.def_impl(partial(dispatch.apply_primitive, to_edtype_p))
@@ -4998,6 +5016,9 @@ mlir.register_lowering(to_edtype_p, lambda _, x, **__: [x])
 def _from_edtype_abstract_eval(x, *, dtype):
   assert (isinstance(x.dtype, dtypes.ExtendedDType) and
           not isinstance(dtype, dtypes.ExtendedDType))
+  if not isinstance(x, (ShapedArray, core.DShapedArray)):
+    raise TypeError("can only convert from an extended dtype on an array type,"
+                    f"but got {type(x)}")
   if convert_from := getattr(x.dtype._rules, 'convert_from', None):
     allow_conversion = convert_from(x.dtype, dtype)
   else:
@@ -5007,16 +5028,22 @@ def _from_edtype_abstract_eval(x, *, dtype):
         f"Cannot convert_element_type from {dtype_to_string(x.dtype)} "
         f"to {dtype_to_string(dtype)}")
   rep_aval = core.physical_element_aval(x.dtype)
+  assert tuple(rep_aval.sharding.spec) == (None,) * rep_aval.ndim
   if rep_aval.dtype != dtype:
     raise ValueError(
         "can only convert from extended dtype to its representation dtype, "
         f"but tried to convert from {dtype_to_string(x.dtype)} to "
         f"{dtype_to_string(dtype)} which doesn't match the representation type "
         f"{dtype_to_string(rep_aval.dtype)}.")
-  if all(isinstance(d, int) for d in x.shape):
-    return core.ShapedArray(shape=(*x.shape, *rep_aval.shape), dtype=dtype)
+  if isinstance(x, ShapedArray):
+    return x.update(shape=(*x.shape, *rep_aval.shape), dtype=dtype)
+  elif isinstance(x, core.DShapedArray):
+    if all(isinstance(d, int) for d in x.shape):
+      return core.ShapedArray(shape=(*x.shape, *rep_aval.shape), dtype=dtype)
+    else:
+      raise NotImplementedError
   else:
-    raise NotImplementedError
+    assert False  # unreachable, see isinstance check above
 
 from_edtype_p = Primitive('from_edtype')
 from_edtype_p.def_impl(partial(dispatch.apply_primitive, from_edtype_p))
@@ -5227,7 +5254,7 @@ def _dot_general_sharding_rule(lhs, rhs, *, dimension_numbers, precision,
             ' out_sharding provided to dot_general mentions unreduced_axes.'
             f' Got {out_sharding=}, {lhs_contracting_spec=},'
             f' {rhs_contracting_spec=}')
-      if out_sharding.spec.unreduced != lhs_contracting_spec:
+      if out_sharding.spec.unreduced != frozenset(lhs_contracting_spec):
         raise core.ShardingTypeError(
             "out_sharding's unreduced axes should be equal to the contracting"
             f' specs. Got unreduced axes={out_sharding.spec.unreduced} and'
@@ -6550,7 +6577,7 @@ def _broadcast_in_dim_partial_eval(
   out_aval = core.DShapedArray(tuple(shape_), operand.dtype, operand.weak_type)
   out_tracer = pe.JaxprTracer(trace, pe.PartialVal.unknown(out_aval), None)
   eqn = pe.new_eqn_recipe(
-      [operand_tracer, *dyn_shape_tracers], [out_tracer], broadcast_in_dim_p,
+      trace, [operand_tracer, *dyn_shape_tracers], [out_tracer], broadcast_in_dim_p,
       dict(shape=shape, broadcast_dimensions=broadcast_dimensions,
            sharding=None),
       core.no_effects, source_info_util.current())
@@ -7922,7 +7949,7 @@ def _sort_abstract_eval(*args, **kwargs):
 
 
 def _canonicalize_float_for_sort(x):
-  # In the sort comparator, we are going to use a comparision operator where -0
+  # In the sort comparator, we are going to use a comparison operator where -0
   # would be before 0, and -NaN and NaN appear at the beginning and end of the
   # ordering. In this scheme, -0 would be before 0, and -NaN and NaN appear at
   # the beginning and end of the ordering. This causes issues for stable
@@ -8067,6 +8094,15 @@ def _top_k_abstract_eval(operand, *, k):
   if shape[-1] < k:
     msg = "k argument to top_k must be no larger than minor dimension; {} vs {}"
     raise ValueError(msg.format(k, shape))
+  int32_max = dtypes.iinfo('int32').max
+  try:
+    too_large = (shape[-1] > int32_max + 1)
+  except core.InconclusiveDimensionOperation:
+    pass
+  else:
+    if too_large:
+      raise ValueError("top_k returns int32 indices, which will overflow for array dimensions "
+                       f"larger than the maximum int32 ({int32_max}). Got {operand.shape=}")
   shape[-1] = k
   return (operand.update(shape=shape, dtype=operand.dtype,
                          weak_type=operand.weak_type),
@@ -8163,7 +8199,7 @@ mlir.register_lowering(create_token_p, _create_token_lowering)
 def after_all(*operands):
   """Merges one or more XLA token values. Experimental.
 
-  Wraps the XLA AfterAll operator."""
+  Wraps the XLA after all operator."""
   operands = core.standard_insert_pvary(*operands)
   return after_all_p.bind(*operands)
 
@@ -8188,6 +8224,7 @@ class InOutFeedEffect(effects.Effect):
 infeed_effect = InOutFeedEffect()
 outfeed_effect = InOutFeedEffect()
 
+effects.custom_derivatives_allowed_effects.add_type(InOutFeedEffect)
 
 def infeed(token, shape=None, partitions=None):
   """Consumes an infeed value of `shape` from the host. Experimental.

@@ -23,7 +23,6 @@ from typing import Any, Union
 from jax._src import config
 from jax._src.util import use_cpp_class, cache, use_cpp_method
 from jax._src.lib import xla_client as xc
-from jax._src.lib import jaxlib_extension_version
 from jax._src.lib.mlir.dialects import sdy
 from jax._src import mesh as mesh_lib
 from jax._src.mesh import AxisType
@@ -303,7 +302,7 @@ class SdyArray:
   dim_shardings: Sequence[SdyDim]
   logical_device_ids: tuple[int, ...] | None = None
   replicated_axes: tuple[str, ...] = ()
-  unreduced_axes: tuple[str, ...] = ()
+  unreduced_axes: frozenset[str] = frozenset()
 
   def build(self) -> sdy.TensorShardingAttr:
     if self.mesh_shape is None:
@@ -317,17 +316,11 @@ class SdyArray:
 
     replicated_axes = _get_axes(self.replicated_axes, self.mesh_shape)
     unreduced_axes = _get_axes(self.unreduced_axes, self.mesh_shape)
-    if jaxlib_extension_version >= 342:
-      return sdy.TensorShardingAttr.get(
-          mesh_attr,
-          [dim_sharding.build() for dim_sharding in self.dim_shardings],
-          replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in replicated_axes],
-          unreduced_axes=[sdy.AxisRefAttr.get(axis) for axis in unreduced_axes])
-    else:
-      return sdy.TensorShardingAttr.get(
-          mesh_attr,
-          [dim_sharding.build() for dim_sharding in self.dim_shardings],
-          replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in replicated_axes])
+    return sdy.TensorShardingAttr.get(
+        mesh_attr,
+        [dim_sharding.build() for dim_sharding in self.dim_shardings],
+        replicated_axes=[sdy.AxisRefAttr.get(axis) for axis in replicated_axes],
+        unreduced_axes=[sdy.AxisRefAttr.get(axis) for axis in unreduced_axes])
 
   def __repr__(self):
     dim_sharding_repr = ', '.join(
@@ -510,24 +503,11 @@ def _check_mesh_resource_axis(mesh, pspec):
         f' axis_types: {mesh._axis_types_dict}')
 
 def _check_mesh_unreduced(mesh, pspec):
-  counts = {}
-  duplicate = False
   for u in pspec.unreduced:
     if u not in mesh.axis_names:
       raise ValueError(
           f'Unreduced axes {u} is not found in {mesh.axis_names=}. '
           f'Got {pspec=}')
-    count = counts.get(u, 0)
-    if count > 0:
-      duplicate = True
-    counts[u] = count + 1
-  if duplicate:
-    multiple_uses = [r for r, c in counts.items() if c > 1]
-    raise ValueError(
-        f'Unreduced axes in {pspec} has duplicate entries which is not allowed.'
-        f' Got {mesh_lib.show_axes(multiple_uses)}')
-
-  for u in pspec.unreduced:
     if mesh._name_to_type[u] in (AxisType.Auto, AxisType.Manual):
       raise ValueError(
           'Unreduced axes can only refer to mesh axes that is of type'

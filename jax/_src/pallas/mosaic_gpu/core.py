@@ -71,7 +71,7 @@ def is_trivial_index(idx, shape) -> bool:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class GPUCompilerParams(pallas_core.CompilerParams):
+class CompilerParams(pallas_core.CompilerParams):
   """Mosaic GPU compiler parameters.
 
   Attributes:
@@ -87,6 +87,16 @@ class GPUCompilerParams(pallas_core.CompilerParams):
       references. Defaults to 0, and must be strictly smaller than
       max_concurrent_steps. Generally, you'll want to set it to 1 if you don't
       await the WGMMA in the body.
+    unsafe_no_auto_barriers: If True, Pallas will never automatically insert
+      barrier instructions that ensure synchronous semantics of loads and stores.
+      At the moment, the insertion is done conservatively and might regress
+      performance. There are (at least) two conditions that must be satisfied
+      for the use of this flag to be safe. First, no memory region is ever read
+      *and* written to by the same thread (async copies are performed by
+      background threads and do not count towards this rule). Secondly, no
+      thread ever calls commit_smem(), reads from the committed SMEM and then
+      issues an async copy overwriting that region (this is a very artificial
+      and highly unlikely scenario).
     profile_space: The number of profiler events that can be collected in a
       single invocation. It is undefined behavior if a thread collects more
       events than this.
@@ -97,6 +107,7 @@ class GPUCompilerParams(pallas_core.CompilerParams):
   dimension_semantics: Sequence[DimensionSemantics] | None = None
   max_concurrent_steps: int = 1
   delay_release: int = 0
+  unsafe_no_auto_barriers: bool = False
   profile_space: int = 0
   profile_dir: str = ""
   lowering_semantics: mgpu.core.LoweringSemantics = mgpu.core.LoweringSemantics.Lane
@@ -108,7 +119,7 @@ class GPUCompilerParams(pallas_core.CompilerParams):
       )
 
 
-class GPUMemorySpace(enum.Enum):
+class MemorySpace(enum.Enum):
   #: Global memory.
   GMEM = "gmem"
   #: Shared memory.
@@ -145,7 +156,7 @@ class SemaphoreType(enum.Enum):
       dtype = pallas_core.BarrierSemaphore()
     else:
       dtype = pallas_core.Semaphore()
-    return pallas_core.MemoryRef(shape, dtype, GPUMemorySpace.GMEM)
+    return pallas_core.MemoryRef(shape, dtype, MemorySpace.GMEM)
 
   def get_array_aval(self) -> jax_core.ShapedArray:
     return self(()).get_array_aval()
@@ -183,7 +194,7 @@ def kernel(
   def wrapper(*operands):
     def stateful(operand_and_out_refs):
       operand_refs, out_refs = operand_and_out_refs
-      mesh = GPUMesh(**mesh_kwargs)
+      mesh = Mesh(**mesh_kwargs)
       thread_name = mesh.thread_name if mesh.thread_name is not None else ()
       def cmap_body():
         pallas_primitives.run_scoped(
@@ -234,7 +245,7 @@ class GPUMemoryRef(pallas_core.MemoryRef):
   collective: bool | None = dataclasses.field(default=None, kw_only=True)
 
   def __post_init__(self):
-    if self.memory_space != GPUMemorySpace.TMEM:
+    if self.memory_space != MemorySpace.TMEM:
       if self.packed is not None:
         raise ValueError("Packed option is only supported for TMEM.")
       if self.collective is not None:
@@ -244,7 +255,7 @@ class GPUMemoryRef(pallas_core.MemoryRef):
     aval = jax_core.ShapedArray(self.shape, self.dtype)
     for t in self.transforms:
       aval = t(aval)
-    if self.memory_space == GPUMemorySpace.TMEM:
+    if self.memory_space == MemorySpace.TMEM:
       ref = pallas_core.TransformedRef(
           AbstractTMEMRef(aval,
                           memory_space=self.memory_space,
@@ -357,7 +368,7 @@ class RefUnion(GPUMemoryRef):
   """A sequence of trees of refs that are allowed to reuse the same memory.
 
   One should not make assumptions as to how each ref will map to the underlying
-  memory region, since arbitrary padding may be applied inbetween different
+  memory region, since arbitrary padding may be applied in between different
   refs.
 
   As such, ref unions are only safe to use when the groups of refs that we
@@ -448,7 +459,7 @@ class UntileRef(state_types.Transform):
       self, perm: tuple[int, ...]
   ) -> tuple[tuple[int, ...], state_types.Transform]:
     # The transpose in question is applied to the utiled ref so we
-    # need to translate it by duplicating and offseting the last part.
+    # need to translate it by duplicating and offsetting the last part.
     off = len(perm)
     new_suffix = [i + off for i in perm[-len(self.tiling) :]]
     if set(new_suffix) != set(range(off, off + len(self.tiling))):
@@ -785,7 +796,7 @@ class UnswizzleRef(state_types.Transform):
 
 
 @dataclasses.dataclass
-class GPUBlockSpec(pallas_core.BlockSpec):
+class BlockSpec(pallas_core.BlockSpec):
   transforms: Sequence[MemoryRefTransform] = ()
 
   def to_block_mapping(
@@ -817,10 +828,10 @@ class GPUBlockSpec(pallas_core.BlockSpec):
     )
 
 
-GMEM = GPUMemorySpace.GMEM
-SMEM = GPUMemorySpace.SMEM
-TMEM = GPUMemorySpace.TMEM
-REGS = GPUMemorySpace.REGS
+GMEM = MemorySpace.GMEM
+SMEM = MemorySpace.SMEM
+TMEM = MemorySpace.TMEM
+REGS = MemorySpace.REGS
 
 
 class barrier_dtype(dtypes.extended):
@@ -850,7 +861,7 @@ class ClusterBarrierType(dtypes.ExtendedDType):
     return self.name
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class Barrier:
   """Describes a barrier Ref.
 
@@ -860,11 +871,11 @@ class Barrier:
       barriers can be accessed by indexing into the barrier Ref.
     for_tensor_core: Whether this barrier is used for synchronizing with
       the tensor core. This should be set to True when waiting on Blackwell
-      (TC Gen 5) asynchoronous matmul instructions.
+      (TC Gen 5) asynchronous matmul instructions.
   """
-  num_arrivals: int
+  num_arrivals: int = 1
   num_barriers: int = 1
-  for_tensor_core: bool = dataclasses.field(default=False, kw_only=True)
+  for_tensor_core: bool = False
 
   def get_ref_aval(self) -> AbstractMemoryRef:
     aval = jax_core.ShapedArray(
@@ -879,7 +890,7 @@ class Barrier:
           f"Num arrivals must be at least 1, but got {self.num_arrivals}"
       )
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class ClusterBarrier:
   collective_axes: tuple[str | tuple[str, ...], ...]
   num_barriers: int = 1
@@ -903,7 +914,7 @@ class WGMMAAccumulatorRef:
           "Preinitialized WGMMAAccumulatorRef only supported in pl.run_state."
       )
     return WGMMAAbstractAccumulatorRef(
-        jax_core.ShapedArray(shape=self.shape, dtype=self.dtype), GPUMemorySpace.REGS
+        jax_core.ShapedArray(shape=self.shape, dtype=self.dtype), MemorySpace.REGS
     )
 
   @staticmethod
@@ -913,7 +924,7 @@ class WGMMAAccumulatorRef:
 
 def _wgmma_ref_type_mapping(ref: WGMMAAccumulatorRef):
   aval = WGMMAAbstractAccumulatorRef(
-      jax_core.ShapedArray(shape=ref.shape, dtype=ref.dtype), GPUMemorySpace.REGS
+      jax_core.ShapedArray(shape=ref.shape, dtype=ref.dtype), MemorySpace.REGS
   )
   return aval, ref._init
 state_types._ref_type_aval_mappings[WGMMAAccumulatorRef] = _wgmma_ref_type_mapping
@@ -962,7 +973,7 @@ class AbstractTMEMRef(AbstractMemoryRef):
 _WARPGROUP_AXIS_NAME = object()
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class GPUMesh:
+class Mesh:
   grid: Sequence[int] = ()
   grid_names: Sequence[str] = ()
   cluster: Sequence[int] = ()
@@ -1049,15 +1060,15 @@ def _gpu_mesh_discharge_rule(
     cost_estimate,
     name,
 ):
-  if not isinstance(mesh, GPUMesh):
-    raise TypeError(f"Mesh must be a GPUMesh, got {type(mesh)}")
-  if compiler_params and not isinstance(compiler_params, GPUCompilerParams):
+  if not isinstance(mesh, Mesh):
+    raise TypeError(f"Mesh must be a `plgpu.Mesh`, got {type(mesh)}")
+  if compiler_params and not isinstance(compiler_params, CompilerParams):
     raise TypeError(
-        "Compiler params must be a GPUCompilerParams, got"
+        "Compiler params must be a `plgpu.CompilerParams`, got"
         f" {type(compiler_params)}"
     )
   if not compiler_params:
-    compiler_params = GPUCompilerParams()
+    compiler_params = CompilerParams()
   return pallas_core.default_mesh_discharge_rule(
       in_avals,
       out_avals,
@@ -1073,7 +1084,7 @@ def _gpu_mesh_discharge_rule(
   )
 
 
-pallas_core._core_map_mesh_rules[GPUMesh] = _gpu_mesh_discharge_rule
+pallas_core._core_map_mesh_rules[Mesh] = _gpu_mesh_discharge_rule
 
 
 class MemoryEffect(jax_core.Effect):
