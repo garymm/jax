@@ -3511,7 +3511,7 @@ class APITest(jtu.JaxTestCase):
       logging.set_verbosity(prev_level)
     self.assertGreaterEqual(len(l.output), 3)  # 3 lines
     self.assertTrue(any('Finished tracing' in line for line in l.output))
-    self.assertTrue(any('Compiling f' in line for line in l.output))
+    self.assertTrue(any('Compiling jit(f)' in line for line in l.output))
     self.assertTrue(any('Finished XLA compilation' in line for line in l.output))
 
   def test_grad_of_jit_compilation_caching(self):
@@ -4546,11 +4546,14 @@ class APITest(jtu.JaxTestCase):
       return x
 
     state = jnp.arange(5, dtype=jnp.uint32)
-    inner_fn(state)
-    outer_fn(state)
 
+    outer_fn(state)
+    outer_fn(state)
     self.assertEqual(inner_count, 1)
     self.assertEqual(outer_count, 1)
+
+    inner_fn(state)
+    self.assertEqual(inner_count, 1)  # not retraced when top-level
 
   def test_grad_conj_symbolic_zeros(self):
     # https://github.com/jax-ml/jax/issues/15400

@@ -1780,7 +1780,7 @@ def _trace_composite_to_jaxpr(fun: Callable,
                               debug_info: core.DebugInfo):
   flat_fun, out_tree = api_util.flatten_fun_nokwargs(
       lu.wrap_init(fun, debug_info=debug_info), in_tree)
-  jaxpr, _, consts, _ = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
   if any(isinstance(c, core.Tracer) for c in consts):
     raise UnexpectedTracerError(
         "Found a JAX Tracer as a constant in the decomposition for the "
@@ -1788,8 +1788,8 @@ def _trace_composite_to_jaxpr(fun: Callable,
         "closes over a value that is involved in a JAX transformation. "
         "Any values that aren't explicitly known at compile time must be "
         "explicitly passed as arguments to the composite.")
-  closed_jaxpr = core.ClosedJaxpr(jaxpr, consts)
-  return closed_jaxpr, out_tree
+  closed_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jaxpr))
+  return closed_jaxpr, consts, out_tree
 
 
 def composite(
@@ -1872,7 +1872,7 @@ def composite(
           "explicitly passed as arguments to the composite."
           "\n\nNote: If you are passing jax arrays as attributes, use numpy "
           "arrays instead.")
-    closed_jaxpr, out_tree = _trace_composite_to_jaxpr(
+    closed_jaxpr, consts, out_tree = _trace_composite_to_jaxpr(
         partial(decomposition, **kwargs), in_tree, in_avals, name, debug_info
     )
     attributes = []
@@ -1882,9 +1882,9 @@ def composite(
           HashableArray(v) if isinstance(v, np.ndarray) else v for v in leaves
       )
       attributes.append((k, leaves, treedef))
-    flat_args = core.standard_insert_pvary(*flat_args)
+    flat_consts_and_args = core.standard_insert_pvary(*consts, *flat_args)
     out_flat = composite_p.bind(
-        *flat_args,
+        *flat_consts_and_args,
         name=name,
         attributes=tuple(attributes),
         version=version,
@@ -1920,7 +1920,6 @@ def _composite_lowering(
   """
   func_op, _, _ = mlir.lower_called_computation(
       name,
-      ctx.name_stack,
       jaxpr,
       ctx.module_context,
       ctx.avals_out,
@@ -2986,7 +2985,7 @@ def _reduction_jaxpr(computation: Callable,
       comp,
       debug_info=api_util.debug_info("reduction_jaxpr", computation,
                                      (aval, aval), {}))
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(comp_wrapped, (aval, aval))
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(comp_wrapped, (aval, aval))
   if any(isinstance(c, core.Tracer) for c in consts):
     raise NotImplementedError(
         "Reduction computations can't close over Tracers. Please open an issue "
@@ -3002,7 +3001,7 @@ def _variadic_reduction_jaxpr(computation: Callable[[Any, Any], Any],
   flat_in_avals, in_tree = tree_util.tree_flatten((avals, avals))
   comp = lu.wrap_init(computation, debug_info=debug_info)
   flat_comp, out_tree = api_util.flatten_fun_nokwargs(comp, in_tree)
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(flat_comp, tuple(flat_in_avals))
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_comp, tuple(flat_in_avals))
   if any(isinstance(c, core.Tracer) for c in consts):
     raise NotImplementedError(
         "Reduction computations can't close over Tracers. Please open an issue "
@@ -4046,15 +4045,6 @@ def broadcast_hlo(
     out.append(arg)
   return out
 
-def multi_sharding_in_dim(ctx, ops, in_avals, out_aval):
-  out = []
-  for op, in_aval in zip(ops, in_avals):
-    if in_aval.sharding == out_aval.sharding or in_aval.sharding is None:
-      out.append(op)
-    else:
-      out.append(mlir.lower_with_sharding_in_types(ctx, op, out_aval))
-  return out
-
 
 def _nary_lower_hlo(
     op: Callable, ctx, *args: ir.Value, accuracy=None, **params
@@ -4063,8 +4053,8 @@ def _nary_lower_hlo(
   """
   del params
   avals_in, (aval_out,) = ctx.avals_in, ctx.avals_out
-  args = mlir.multi_broadcast_in_dim(ctx, args, avals_in, aval_out.shape)
-  args = multi_sharding_in_dim(ctx, args, avals_in, aval_out)
+  args = mlir.multi_broadcast_in_dim(ctx, args, avals_in, aval_out.shape,
+                                     aval_out.sharding)
 
   out = op(*args)
   if accuracy:
@@ -4338,7 +4328,8 @@ def _complex_transpose_rule(t, x, y):
     else:
       return [None, _unbroadcast(y.aval, imag(neg(t)))]
 
-_complex_dtype = lambda dtype, *args, **kwargs: (np.zeros((), dtype) + np.zeros((), np.complex64)).dtype
+def _complex_dtype(dtype, *args, **kwargs):
+  return (np.zeros((), dtype) + np.zeros((), np.complex64)).dtype
 complex_p = naryop(_complex_dtype, [_complex_elem_types, _complex_elem_types],
                   'complex')
 ad.deflinear2(complex_p, _complex_transpose_rule)

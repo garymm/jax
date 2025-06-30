@@ -710,7 +710,8 @@ def _check_output_dtype_jacfwd(holomorphic, x):
                       f"but got {aval.dtype.name}.")
 
 def jacrev(fun: Callable, argnums: int | Sequence[int] = 0,
-           has_aux: bool = False, holomorphic: bool = False, allow_int: bool = False) -> Callable:
+           has_aux: bool = False, holomorphic: bool = False,
+           allow_int: bool = False) -> Callable:
   """Jacobian of ``fun`` evaluated row-by-row using reverse-mode AD.
 
   Args:
@@ -856,13 +857,20 @@ def hessian(fun: Callable, argnums: int | Sequence[int] = 0,
   return jacfwd(jacrev(fun, argnums, has_aux=has_aux, holomorphic=holomorphic),
                 argnums, has_aux=has_aux, holomorphic=holomorphic)
 
+def _insert_pvary(basis, leaf):
+  if not config._check_vma.value:
+    return basis
+  return core.pvary(basis, tuple(core.typeof(leaf).vma))
+
 def _std_basis(pytree):
   import jax.numpy as jnp  # pytype: disable=import-error
   leaves, _ = tree_flatten(pytree)
   ndim = sum(map(np.size, leaves))
   dtype = dtypes.result_type(*leaves)
   flat_basis = jnp.eye(ndim, dtype=dtype)
-  return _unravel_array_into_pytree(pytree, 1, None, flat_basis)
+  out_pytree = _unravel_array_into_pytree(pytree, 1, None, flat_basis)
+  out_pytree = tree_map(_insert_pvary, out_pytree, pytree)
+  return out_pytree
 
 def _jacfwd_unravel(input_pytree, output_pytree_leaf, arr):
   return _unravel_array_into_pytree(
@@ -1834,11 +1842,8 @@ def jvp(
 
 def _jvp(fun: lu.WrappedFun, primals, tangents, has_aux=False):
   """Variant of jvp() that takes an lu.WrappedFun."""
-  primals_, (), primal_box_data = pjit._flatten_boxes(fun.debug_info, primals, {})
-  tangents_, (), tangent_box_data = pjit._flatten_boxes(fun.debug_info, tangents, {})
-  fun = pjit._handle_boxes(fun, fun.debug_info)
-  ps_flat, tree_def = tree_flatten(primals_)
-  ts_flat, tree_def_2 = tree_flatten(tangents_)
+  ps_flat, tree_def = tree_flatten(primals)
+  ts_flat, tree_def_2 = tree_flatten(tangents)
   if tree_def != tree_def_2:
     raise TypeError("primal and tangent arguments to jax.jvp must have the same tree "
                     f"structure; primals have tree structure {tree_def} whereas tangents have "
@@ -1860,27 +1865,9 @@ def _jvp(fun: lu.WrappedFun, primals, tangents, has_aux=False):
     flat_fun, out_tree = flatten_fun_nokwargs(fun, tree_def)
     out_primals, out_tangents = ad.jvp(flat_fun).call_wrapped(ps_flat, ts_flat)
     out_tree = out_tree()
-    if primal_box_data or tangent_box_data:
-      assert primal_box_data and tangent_box_data
-      box_treedef, out_tree = out_tree.children()
-      box_out_flat, out_primals = split_list(out_primals, [box_treedef.num_leaves])
-      box_dot_out_flat, out_tangents = split_list(out_tangents, [box_treedef.num_leaves])
-      box_out = tree_unflatten(box_treedef, box_out_flat)
-      box_dot_out = tree_unflatten(box_treedef, box_dot_out_flat)
-      for (i, kind), b in zip(primal_box_data, box_out):
-        if kind is pe.BoxAttr:
-          primals[i].set(tree_unflatten(b.treedef, b.leaves))
-        else:
-          assert False
-      for (i, kind), b in zip(tangent_box_data, box_dot_out):
-        if kind is pe.BoxAttr:
-          tangents[i].set(tree_unflatten(b.treedef, b.leaves))
-        else:
-          assert False
     return (tree_unflatten(out_tree, out_primals),
             tree_unflatten(out_tree, out_tangents))
   else:
-    if primal_box_data or tangent_box_data: raise NotImplementedError
     flat_fun, out_aux_trees = flatten_fun_nokwargs2(fun, tree_def)
     jvp_fun, aux = ad.jvp(flat_fun, has_aux=True)
     out_primals, out_tangents = jvp_fun.call_wrapped(ps_flat, ts_flat)

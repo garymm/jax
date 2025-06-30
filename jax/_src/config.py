@@ -248,7 +248,8 @@ def trace_context():
           use_high_dynamic_range_gumbel.value,
           error_checking_behavior_nan.value,
           error_checking_behavior_divide.value,
-          error_checking_behavior_oob.value)
+          error_checking_behavior_oob.value,
+          use_simplified_jaxpr_constants.value)
 
 config = Config()
 
@@ -1106,6 +1107,16 @@ use_direct_linearize = bool_state(
     help=('Use direct linearization instead JVP followed by partial eval'),
     include_in_jit_key=True)
 
+use_simplified_jaxpr_constants = bool_state(
+    name='jax_use_simplified_jaxpr_constants',
+    default=False,
+    help=('Enable a simplification of the handling of closed-over constants '
+          'in Jaxpr. The value `True` enables the new behavior. '
+          'This flag will exist only briefly, while we transition '
+          'users. See https://github.com/jax-ml/jax/pull/29679.'
+          'DO NOT RELY ON THIS FLAG.'),
+    include_in_jit_key=True)
+
 # TODO make it so people don't use this, this is internal...
 _check_vma = bool_state(
     name='check_vma',
@@ -1507,7 +1518,7 @@ bcoo_cusparse_lowering = bool_state(
 # if the intended backend can handle lowering the result
 dynamic_shapes = bool_state(
     name='jax_dynamic_shapes',
-    default=bool(os.getenv('JAX_DYNAMIC_SHAPES', '')),
+    default=False,
     help=('Enables experimental features for staging out computations with '
           'dynamic shapes.'),
     include_in_jit_key=True)
@@ -1856,3 +1867,28 @@ use_high_dynamic_range_gumbel = bool_state(
     help='If True, gumble noise draws two samples to cover low probability '
          'events with more precision.',
 )
+
+jax_dump_ir_to = string_flag(
+    name='jax_dump_ir_to',
+    default='',
+    help="Path to which IR(s) emitted by JAX should be dumped as text files."
+         "If omitted, JAX will not dump any IR. "
+         "Supports the special value 'sponge' to pick the path from the "
+         "environment variable TEST_UNDECLARED_OUTPUTS_DIR. See "
+         "jax_dump_ir_modes for options governing what is dumped.")
+
+jax_include_debug_info_in_dumps = bool_flag(
+    name='jax_include_debug_info_in_dumps',
+    default=True,
+    help='Determine whether or not to keep debug symbols and location '
+        'information when dumping IR code. By default, debug information will '
+        'be preserved in the IR dump. To avoid exposing source code and '
+        'potentially sensitive information, set to false ')
+
+# TODO(dsuo): Turn this into a list-valued flag.
+jax_dump_ir_modes = string_flag(
+    name="jax_dump_ir_modes",
+    default="stablehlo",
+    help="Comma-delimited modes in which to dump IR. Can be 'stablehlo' (the "
+         "default), 'jaxpr', or 'eqn_count_pprof' for "
+         "jaxpr equation count pprof profile.")

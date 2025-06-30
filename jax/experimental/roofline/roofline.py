@@ -22,6 +22,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding
 from jax._src import api
 from jax._src import core
+from jax._src import prng
 from jax._src import source_info_util
 from jax._src import traceback_util
 from jax._src import util
@@ -35,6 +36,7 @@ from jax._src.shard_map import shard_map, shard_map_p
 
 ShapeDtypeStructTree = Any
 Specs = Any
+ValidRooflineDtype = np.dtype | prng.KeyTy
 
 map = util.safe_map
 
@@ -54,14 +56,16 @@ class RooflineRuleContext:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RooflineShape:
   shape: tuple[int, ...]
-  dtype: np.dtype
+  dtype: ValidRooflineDtype
 
   @classmethod
   def from_aval(cls, aval: core.AbstractValue) -> RooflineShape:
     if not isinstance(aval, core.ShapedArray):
       raise TypeError(f"Expected ShapedArray, got {type(aval)}.")
-    if not isinstance(aval.dtype, np.dtype):
-      raise TypeError(f"Expected numpy dtype, got {type(aval.dtype)}.")
+    if not isinstance(aval.dtype, ValidRooflineDtype):
+      raise TypeError(
+          f"Expected numpy or prng.KeyTy dtype, got {type(aval.dtype)}."
+      )
     return cls(shape=aval.shape, dtype=aval.dtype)
 
   @property
@@ -137,7 +141,7 @@ def _roofline_interpreter(
   pin_lhs_in_vmem: bool = False,
   pin_rhs_in_vmem: bool = False,
 ) -> RooflineResult:
-  name_stack = source_info_util.new_name_stack(util.wrap_name(f_name, "roofline"))
+  name_stack = source_info_util.new_name_stack(util.wrap_name("roofline", f_name))
 
   result = RooflineResult.zeros()
 
@@ -183,7 +187,7 @@ def _roofline_interpreter(
     ):
       if "jaxpr" in eqn.params:
         result += _roofline_interpreter(
-          util.wrap_name(f_name, eqn.primitive.name),
+          util.wrap_name(eqn.primitive.name, f_name),
           eqn.params["jaxpr"],
           mesh,
           pin_lhs_in_vmem=pin_lhs_in_vmem,
@@ -193,7 +197,7 @@ def _roofline_interpreter(
         # Used for custom_jvp_call_p. Recursively calculates roofline result for
         # all primitives in the custom function.
         result += _roofline_interpreter(
-          util.wrap_name(f_name, eqn.primitive.name),
+          util.wrap_name(eqn.primitive.name, f_name),
           eqn.params['call_jaxpr'],
           mesh,
           pin_lhs_in_vmem=pin_lhs_in_vmem,

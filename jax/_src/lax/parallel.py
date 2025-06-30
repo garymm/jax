@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import partial
+from dataclasses import dataclass
 import itertools
 import math
 
@@ -1177,8 +1178,13 @@ batching.fancy_primitive_batchers[ppermute_p] = _ppermute_batcher
 batching.skippable_batchers[ppermute_p] = partial(_names_in_param, 'axis_name')
 
 
+@dataclass(frozen=True)
 class SingleSideCollectiveEffect(core.Effect):
   __str__ = lambda _: "one-sided communication"
+  def __hash__(self):
+    return hash(SingleSideCollectiveEffect)
+  def __eq__(self, other):
+    return isinstance(other, SingleSideCollectiveEffect)
 
 
 single_side_collective_effect = SingleSideCollectiveEffect()
@@ -1205,7 +1211,7 @@ def _psend_lowering_gpu(ctx, x, *, axis_name, perm):
   sharding = xc.OpSharding()
   sharding.type = xc.OpSharding.Type.MANUAL
   mlir.set_sharding(send_op, sharding)
-  return [send_op.results]
+  return send_op.results
 
 
 mlir.lowerable_effects.add_type(SingleSideCollectiveEffect)
@@ -1215,7 +1221,7 @@ def _psend_abstract_eval(x, *, axis_name, **params):
   _check_axis_names(axis_name)
   return abstract_token, {
       *map(core.NamedAxisEffect, axis_name),
-      SingleSideCollectiveEffect(),
+      single_side_collective_effect,
   }
 
 
@@ -1260,7 +1266,7 @@ def _precv_abstract_eval(
     token, *, out_shape, axis_name, **params
 ):
   return out_shape, {*map(core.NamedAxisEffect, axis_name),
-                     SingleSideCollectiveEffect()}
+                     single_side_collective_effect}
 
 precv_p = core.Primitive("precv")
 precv_p.multiple_results = False
@@ -1616,31 +1622,27 @@ def _ragged_all_to_all_transpose(
 
 def _ragged_all_to_all_batched_collective(axis_data, vals_in, dims_in,
                                           axis_name, axis_index_groups):
-  del axis_data
+  if axis_data.name in axis_name:
+    raise NotImplementedError("Please open a feature request!")
   if axis_index_groups:
     raise NotImplementedError("Please open a feature request!")
+  size = axis_data.size
 
-  operand, output, input_offsets, send_sizes, output_offsets, recv_sizes = vals_in
-  operand_dim, output_dim, input_offsets_dim, send_sizes_dim, output_offsets_dim, recv_sizes_dim = dims_in
-  if not (operand.shape[operand_dim] == output.shape[output_dim] == input_offsets.shape[input_offsets_dim] == send_sizes.shape[send_sizes_dim] == output_offsets.shape[output_offsets_dim] == recv_sizes.shape[recv_sizes_dim]):
-    raise ValueError("all operands must have the same batch sizes")
+  def bdim_at_second(x, d):
+    assert x.ndim == 2
+    return batching.broadcast(x, size, 1) if d is None else x if d == 1 else x.T
+  def merge(x): return x.reshape(-1, *x.shape[2:])
+  def split(x): return x.reshape(size, -1, *x.shape[1:])
 
-  sliced_results = []
-  for i in range(operand.shape[operand_dim]):
-    sliced_operand = slicing.slice_in_dim(operand, start_index=i, limit_index=i+1, axis=operand_dim).flatten()
-    sliced_output = slicing.slice_in_dim(output, start_index=i, limit_index=i+1, axis=output_dim)
-    sliced_output_shape = sliced_output.shape
-    sliced_output = sliced_output.flatten()
-    sliced_input_offsets = slicing.slice_in_dim(input_offsets, start_index=i, limit_index=i+1, axis=input_offsets_dim).flatten()
-    sliced_send_sizes = slicing.slice_in_dim(send_sizes, start_index=i, limit_index=i+1, axis=send_sizes_dim).flatten()
-    sliced_output_offsets = slicing.slice_in_dim(output_offsets, start_index=i, limit_index=i+1, axis=output_offsets_dim).flatten()
-    sliced_recv_sizes = slicing.slice_in_dim(recv_sizes, start_index=i, limit_index=i+1, axis=recv_sizes_dim).flatten()
-    sliced_result = ragged_all_to_all(sliced_operand, sliced_output, sliced_input_offsets, sliced_send_sizes, sliced_output_offsets, sliced_recv_sizes, axis_name=axis_name, axis_index_groups=axis_index_groups)
-    sliced_result = lax.expand_dims(sliced_result.reshape(sliced_output_shape), dimensions=(output_dim,))
-    sliced_results.append(sliced_result)
-
-  concat_result = lax.concatenate(sliced_results, dimension=output_dim)
-  return concat_result, operand_dim
+  operand, output = map(partial(batching.bdim_at_front, size=size), vals_in[:2], dims_in[:2])
+  N, M = operand.shape[1], output.shape[1]
+  input_offsets, send_sizes, output_offsets, recv_sizes = \
+      map(bdim_at_second, vals_in[2:], dims_in[2:])
+  input_offsets += lax.iota(input_offsets.dtype, size)[None, :] * N
+  output_offsets += lax.iota(output_offsets.dtype, size)[None, :] * M
+  vals_in = operand, output, input_offsets, send_sizes, output_offsets, recv_sizes
+  result = split(ragged_all_to_all(*map(merge, vals_in), axis_name=axis_name))
+  return result, 0
 
 ragged_all_to_all_p = core.Primitive('ragged_all_to_all')
 ragged_all_to_all_p.def_effectful_abstract_eval(_ragged_all_to_all_effectful_abstract_eval)

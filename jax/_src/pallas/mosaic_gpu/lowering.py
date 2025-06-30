@@ -309,16 +309,13 @@ def _run_scoped_resource_estimator(
       if aval.shape[0] not in (64, 128):
         raise ValueError(
             f"TMEM shape[0] must be 64 or 128. Got {aval.shape[0]}.")
-      if aval.packed:
-        packing = 4 // aval.dtype.itemsize
+      # Estimate columns used.
+      if isinstance(aval, gpu_core.AbstractRefUnion):
+        assert aval.shape[0] == 128
+        cols_used = aval.shape[1]
       else:
-        packing = 1
-      layout = tcgen05._infer_tmem_layout(
-          aval.shape, aval.collective, packing=packing
-      )
-      cols_used = layout.cols_in_shape(
-          aval.shape, mgpu_utils.dtype_to_ir_type(aval.dtype)
-      )
+        cols_used, _ = gpu_core.infer_tmem_cols_layout(
+            aval.shape, aval.dtype, aval.collective, aval.packed)
       cols_used = tcgen05._alloc_ncols(cols_used, exact=False)
       if aval.collective:
         rs += Resources(tmem_collective_scratch_cols=cols_used)
@@ -448,19 +445,9 @@ class ModuleContext:
       layout: tcgen05.TMEMLayout | None = None,
       collective: bool = False,
       packed: bool = False,
-      exact_cols: bool = False
   ) -> ir.Value:
-    if packed:
-      packing = 4 // struct.dtype.itemsize
-    else:
-      packing = 1
-    if layout is None:
-      layout = tcgen05._infer_tmem_layout(
-          struct.shape, collective, packing=packing
-      )
-    mlir_dtype = mgpu_utils.dtype_to_ir_type(struct.dtype)
-    unpadded_cols_used = layout.cols_in_shape(struct.shape, mlir_dtype)
-    cols_used = tcgen05._alloc_ncols(unpadded_cols_used, exact_cols)
+    cols_used, layout = gpu_core.infer_tmem_cols_layout(
+        struct.shape, struct.dtype, packed, collective, layout)
     if collective:
       off = arith_dialect.addi(
           self.tmem_collective_base_ptr,
@@ -473,7 +460,7 @@ class ModuleContext:
     tmem_ref = tcgen05.TMEMRef(
         address=off,
         shape=struct.shape,
-        dtype=mlir_dtype,
+        dtype=mgpu_utils.dtype_to_ir_type(struct.dtype),
         layout=layout)
     if collective:
       self.tmem_collective_used_cols += cols_used
@@ -552,6 +539,7 @@ class LoweringRuleContext:
   prim: jax_core.Primitive
   avals_in: Sequence[jax_core.ShapedArray]
   avals_out: Sequence[jax_core.ShapedArray]
+  out_layout_hint: mgpu.FragmentedLayout | None
 
   replace = dataclasses.replace
 
@@ -776,7 +764,7 @@ def lower_pipelined_jaxpr_to_module(
     )(*refs)
 
   with grid_mapping.trace_env():
-    new_jaxpr, _, new_consts, () = pe.trace_to_jaxpr_dynamic(
+    new_jaxpr, _, new_consts = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(pipeline_fn, debug_info=jaxpr.debug_info),
         [
             gpu_core.GMEM(
@@ -1085,12 +1073,11 @@ def lower_jaxpr_to_mosaic_gpu(
   # TODO(justinfu): Handle transform scopes.
   last_local_name_stack: list[str] = []
   named_regions = []
-  for eqn in jaxpr.eqns:
+  for i, eqn in enumerate(jaxpr.eqns):
     invals = map(read_env, eqn.invars)
-    source_info = eqn.source_info.replace(
-        name_stack=module_ctx.name_stack + eqn.source_info.name_stack
-    )
-    loc = mlir._source_info_to_location(module_ctx, eqn.primitive, source_info)
+    eqn_name_stack = module_ctx.name_stack + eqn.source_info.name_stack
+    loc = mlir.source_info_to_location(
+        module_ctx, eqn.primitive, eqn_name_stack, eqn.source_info.traceback)
     with source_info_util.user_context(eqn.source_info.traceback), loc:
       if eqn.primitive not in mosaic_lowering_rules[
           (module_ctx.lowering_semantics, module_ctx.primitive_semantics)]:
@@ -1113,12 +1100,22 @@ def lower_jaxpr_to_mosaic_gpu(
       rule = mosaic_lowering_rules[
           (module_ctx.lowering_semantics, module_ctx.primitive_semantics)
           ][eqn.primitive]
+      # If the equation is immediately followed by a layout cast on its output,
+      # we provide the layout as a hint to the rule.
+      out_layout_hint = None
+      if i + 1 < len(jaxpr.eqns):
+        lookahead_eqn = jaxpr.eqns[i + 1]
+        is_layout_cast = lookahead_eqn.primitive == gpu_core.layout_cast_p
+        uses_eqn_output = lookahead_eqn.invars == eqn.outvars
+        if is_layout_cast and uses_eqn_output:
+          out_layout_hint = lookahead_eqn.params["new_layout"].to_mgpu()
       rule_ctx = LoweringRuleContext(
           module_ctx,
           launch_ctx,
           avals_in=[cast(jax_core.ShapedArray, v.aval) for v in eqn.invars],
           avals_out=[cast(jax_core.ShapedArray, v.aval) for v in eqn.outvars],
           prim=eqn.primitive,
+          out_layout_hint=out_layout_hint,
       )
       try:
         outvals = rule(rule_ctx, *invals, **eqn.params)
@@ -1201,7 +1198,7 @@ def _lower_fun(
             "Pallas Mosaic GPU lower_fun", fun, args, params
         ),
     )
-    jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_fun, ctx.avals_in)
+    jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, ctx.avals_in)
     out = lower_jaxpr_to_mosaic_gpu(
         ctx.module_ctx, ctx.launch_ctx, jaxpr, args, consts
     )
@@ -1282,26 +1279,46 @@ def _handle_dtype_bitcast(
 
 
 def _extract_aliased_ref(
-    ref: ir.Value, transforms: Sequence[gpu_core.Transform]
-) -> tuple[ir.Value, Sequence[gpu_core.Transform]]:
+    ref: RefOrTmemType, transforms: Sequence[gpu_core.Transform]
+) -> tuple[RefOrTmemType, Sequence[gpu_core.Transform]]:
   match transforms:
     case (
-        gpu_core.ExtractAliasedRef(dtype, transformed_shape, offset),
+        gpu_core.ExtractAliasedRef(
+            dtype, transformed_shape, offset, packed, collective),
         *other_transforms,
     ):
       mlir_dtype = mgpu_utils.dtype_to_ir_type(dtype)
-      ref_bits = math.prod(transformed_shape) * mgpu_utils.bitwidth(mlir_dtype)
-      if ref_bits % 8:
-        raise NotImplementedError("Only byte-aligned bitcasts are supported.")
-      assert offset % gpu_core.SMEM_ALIGNMENT == 0
-      ref_bytes = ref_bits // 8
-      ref = mgpu.memref_slice(ref, slice(offset, offset + ref_bytes))
-      ref = _handle_dtype_bitcast(
-          ref,
-          ir.MemRefType(ref.type).element_type,
-          mgpu_utils.dtype_to_ir_type(dtype),
-      )
-      ref = mgpu.memref_reshape(ref, transformed_shape)
+      if isinstance(ref, tcgen05.TMEMRef):
+        assert packed is not None
+        assert collective is not None
+        if ref.shape[0] != transformed_shape[0]:
+          raise ValueError(
+              "TMEM aliasing only supported for Refs with the same first"
+              f" dimension, got {ref.shape[0]} != {transformed_shape[0]}."
+          )
+        address = arith_dialect.addi(ref.address, _i32_constant(offset))
+        _, tmem_layout = gpu_core.infer_tmem_cols_layout(
+            transformed_shape, dtype, packed, collective)
+        ref = tcgen05.TMEMRef(
+          address=address,
+          shape=transformed_shape,
+          dtype=mgpu_utils.dtype_to_ir_type(dtype),
+          layout=tmem_layout)
+      else:
+        assert packed is None
+        assert collective is None
+        ref_bits = math.prod(transformed_shape) * mgpu_utils.bitwidth(mlir_dtype)
+        if ref_bits % 8:
+          raise NotImplementedError("Only byte-aligned bitcasts are supported.")
+        assert offset % gpu_core.SMEM_ALIGNMENT == 0
+        ref_bytes = ref_bits // 8
+        ref = mgpu.memref_slice(ref, slice(offset, offset + ref_bytes))
+        ref = _handle_dtype_bitcast(
+            ref,
+            ir.MemRefType(ref.type).element_type,
+            mgpu_utils.dtype_to_ir_type(dtype),
+        )
+        ref = mgpu.memref_reshape(ref, transformed_shape)
       return ref, tuple(other_transforms)
     case _:
       return ref, transforms
@@ -1326,12 +1343,12 @@ def _handle_transforms(
     handle_reshapes=True,
     allow_peer_refs=False,
 ) -> tuple[RefOrTmemType, Sequence[state_types.Transform]]:
+  # Before we handle other transforms, we resolve any possible leading
+  # aliasing transform.
+  ref, transforms = _extract_aliased_ref(ref, transforms)
   if isinstance(ref, tcgen05.TMEMRef):
     mlir_dtype = ref.dtype
   else:
-    # Before we handle other transforms, we resolve any possible leading
-    # aliasing transform.
-    ref, transforms = _extract_aliased_ref(ref, transforms)
     mlir_dtype = ir.MemRefType(ref.type).element_type
   transformed_ref = ref
   new_transforms = []
@@ -1413,7 +1430,9 @@ def _ndindexer_indices(indexer: indexing.NDIndexer) -> tuple[gpu_core.Index, ...
 
 
 @register_lowering_rule(sp.get_p, mgpu.LoweringSemantics.Lane)
-def _get_lowering_rule(ctx: LoweringRuleContext, x_ref, *leaves, tree):
+def _get_lowering_rule(
+    ctx: LoweringRuleContext, x_ref, *leaves, tree, optimized=True
+):
   if isinstance(x_ref, tcgen05.TMEMRef):
     transforms = jax.tree.unflatten(tree, leaves)
     x_tmem, transforms = _handle_transforms(
@@ -1423,7 +1442,7 @@ def _get_lowering_rule(ctx: LoweringRuleContext, x_ref, *leaves, tree):
       raise NotImplementedError(
           f"Unimplemented transforms for TMEM refs. {transforms=}"
       )
-    return x_tmem.load()
+    return x_tmem.load(layout=ctx.out_layout_hint)
 
   if not isinstance(x_ref, ir.Value) and ir.MemRefType.isinstance(x_ref):
     raise TypeError(f"Can only load from references (got {x_ref}).")
@@ -1433,7 +1452,9 @@ def _get_lowering_rule(ctx: LoweringRuleContext, x_ref, *leaves, tree):
   x_smem, transforms = _handle_transforms(
       ctx, x_ref, transforms, allow_peer_refs=True
   )
+  del x_ref  # Don't use x_ref anymore. Use x_smem instead!
 
+  is_signed = mgpu_utils.is_signed(dtype)
   match transforms:
     case (gpu_core.UnswizzleRef(swizzle), gpu_core.UntileRef(tiling)):
       if len(tiling) != 2:
@@ -1444,19 +1465,38 @@ def _get_lowering_rule(ctx: LoweringRuleContext, x_ref, *leaves, tree):
             "Minor tiling dimension does not fit swizzle: "
             f" expected {expected_minor_tiling}, got {tiling[-1]}"
         )
+      layout = ctx.out_layout_hint or mgpu.WGMMA_LAYOUT
       return mgpu.FragmentedArray.load_tiled(
-          x_smem, is_signed=mgpu_utils.is_signed(dtype), swizzle=swizzle
+          x_smem, is_signed=is_signed, swizzle=swizzle, layout=layout, optimized=optimized
       )
     case ():
       # Handle scalar indexing.
       if not ctx.avals_out[0].shape:
-        is_signed = mgpu_utils.is_signed(dtype)
         val = memref_dialect.load(x_smem, [])
         return mgpu.FragmentedArray.splat(val, shape=(), is_signed=is_signed)
 
-      return mgpu.FragmentedArray.load_strided(
-          x_smem, is_signed=mgpu_utils.is_signed(dtype)
-      )
+      match ctx.out_layout_hint:
+        case mgpu.WGStridedFragLayout(shape=shape, vec_size=vec_size):
+          ref_ty = ir.MemRefType(x_smem.type)
+          if shape != tuple(ref_ty.shape):
+            raise ValueError(
+                f"Unsupported shape {shape}, (expected {tuple(ref_ty.shape)})"
+            )
+          return mgpu.FragmentedArray.load_strided(
+              x_smem,
+              is_signed=is_signed,
+              vec_size=vec_size,
+          )
+        case None:
+          return mgpu.FragmentedArray.load_strided(x_smem, is_signed=is_signed)
+        case _:
+          return mgpu.FragmentedArray.load_untiled(
+              x_smem,
+              is_signed=is_signed,
+              layout=ctx.out_layout_hint,
+              swizzle=16,
+              optimized=optimized,
+          )
     case _:
       raise NotImplementedError(f"Unsupported transforms: {transforms}")
 
@@ -1678,13 +1718,22 @@ def _broadcast_in_dim_lowering_rule(
       and y_aval.ndim == x_aval.ndim + 1
       and x.layout in (mgpu.WGMMA_ROW_LAYOUT, mgpu.TCGEN05_ROW_LAYOUT)
   ):
-    return x.broadcast_minor(y_aval.shape[-1])
+    if x.layout == mgpu.WGMMA_ROW_LAYOUT:
+      new_layout = mgpu.WGMMA_LAYOUT
+    elif x.layout == mgpu.TCGEN05_ROW_LAYOUT:
+      new_layout = mgpu.TCGEN05_LAYOUT
+    else:
+      raise NotImplementedError(f"Unsupported layout: {x.layout}")
+    return x.broadcast_in_dim(y_aval.shape, broadcast_dimensions, new_layout)
   if (
       broadcast_dimensions == (1,)
       and y_aval.ndim == x_aval.ndim + 1
       and x.layout in (mgpu.WGMMA_COL_LAYOUT, mgpu.TCGEN05_COL_LAYOUT)
   ):
-    return x.broadcast_major(y_aval.shape[-2])
+    # XXX: WGMMA_COL_LAYOUT == TCGEN05_COL_LAYOUT, so there's no way to
+    # distinguish between them! Layout hints are necessary for that.
+    new_layout = ctx.out_layout_hint or mgpu.WGMMA_LAYOUT
+    return x.broadcast_in_dim(y_aval.shape, broadcast_dimensions, new_layout)
   if broadcast_dimensions:
     raise NotImplementedError(
         f"Unsupport broadcast {broadcast_dimensions} for layout: {x.layout}"
@@ -2440,11 +2489,14 @@ def _run_scoped_lowering_rule(
         input_refs.append(input_ref)
         should_discharge.append(False)
       elif aval.memory_space == gpu_core.TMEM:
+        if isinstance(aval, gpu_core.AbstractRefUnion):
+          packed = False
+        else:
+          packed = aval.packed
         input_ref = alloc_stack.enter_context(
             ctx.module_ctx.alloc_tmem(
                 jax.ShapeDtypeStruct(shape=aval.shape, dtype=aval.dtype),
-                packed=aval.packed,
-                exact_cols=False,
+                packed=packed,
                 collective=aval.collective,
             )
         )
@@ -3238,3 +3290,47 @@ def _check_lowering_rule(ctx: LoweringRuleContext, *err_args, err_tree, debug):
   not_pred = arith_dialect.xori(pred.registers.item(), minus_one)
   cf_dialect.assert_(not_pred, exception.fmt_string)
   return []
+
+@register_lowering_rule(gpu_core.layout_cast_p, mgpu.LoweringSemantics.Lane)
+def _layout_cast_lowering(ctx: LoweringRuleContext, x, *, new_layout):
+  del ctx  # Unused.
+  return x.to_layout(new_layout.to_mgpu())
+
+
+@register_lowering_rule(gpu_core.layout_cast_p, mgpu.LoweringSemantics.Warpgroup)
+def _layout_cast_lowering_wg(
+    ctx: LoweringRuleContext, x, *, new_layout
+):
+  del ctx  # Unused.
+  return mgpu.dialect.layout_cast(x, mgpu.to_layout_attr(new_layout.to_mgpu()))
+
+
+@register_lowering_rule(lax.iota_p, mgpu.LoweringSemantics.Lane)
+def _iota_lowering(
+    ctx: LoweringRuleContext, dtype, shape, dimension, sharding
+):
+  del sharding  # Unused.
+  if ctx.out_layout_hint is None:
+    raise RuntimeError(
+        "Failed to infer the output layout of the iota. Please apply"
+        " plgpu.layout_cast to its output right after its creation."
+    )
+  mlir_dtype = mgpu_utils.dtype_to_ir_type(dtype)
+  if ir.FloatType.isinstance(mlir_dtype):
+    i32 = ir.IntegerType.get_signless(32)
+    cast = lambda x: arith_dialect.uitofp(
+        mlir_dtype, arith_dialect.index_cast(i32, x)
+    )
+  else:
+    cast = lambda x: arith_dialect.index_cast(mlir_dtype, x)
+  is_signed = mgpu_utils.is_signed(dtype)
+  return mgpu.FragmentedArray.splat(
+      llvm_dialect.mlir_undef(mlir_dtype),
+      shape,
+      ctx.out_layout_hint,
+      is_signed=is_signed,
+  ).foreach(
+      lambda _, idx: cast(idx[dimension]),
+      create_array=True,
+      is_signed=is_signed,
+  )

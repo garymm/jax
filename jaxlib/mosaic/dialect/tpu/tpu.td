@@ -36,6 +36,7 @@ def TPU_Dialect : Dialect {
 
     static std::optional<CoreType> GetCoreTypeAttr(Operation *op);
   }];
+  let hasConstantMaterializer = 1;
 }
 
 class TPU_Attr<string name, string mnemonic_, list<Trait> traits = []>
@@ -484,7 +485,7 @@ def TPU_GatherOp : TPU_Op<"gather", [Pure]> {
   }];
 }
 
-def TPU_DynamicGatherOp : TPU_Op<"dynamic_gather", [Pure, SameOperandsAndResultShape, AllTypesMatch<["source", "output"]>]> {
+def TPU_DynamicGatherOp : TPU_Op<"dynamic_gather", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>, AllShapesMatch<["indices", "output"]>, AllElementTypesMatch<["source", "output"]>]> {
   let description = [{
     Gathers elements from `source` using `indices`.
 
@@ -498,7 +499,7 @@ def TPU_DynamicGatherOp : TPU_Op<"dynamic_gather", [Pure, SameOperandsAndResultS
     - `jk` is the subsequence of `in` for `n` not in `dimensions`.
 
     When a single dimension is specified, this is similar to
-    `np.take_along_axis`, except that OOB indices wrap.
+    `np.take_along_axis`.
   }];
   let arguments = (ins
     AnyVectorOfNonZeroRank:$source,
@@ -540,6 +541,25 @@ def TPU_SIToFPOp : TPU_Op<"sitofp", [Pure, ElementwiseMappable]> {
   let arguments = (ins AnyType:$in, TPU_RoundingModeEnum:$rounding_mode);
   let results = (outs AnyType:$output);
   let assemblyFormat = [{ $in attr-dict `:` type($in) `->` type($output) }];
+}
+
+// Internal operation.
+def TPU_ExtFOp : TPU_Op<"extf", [Pure, ElementwiseMappable]> {
+  let arguments = (ins AnyType:$in);
+  let results = (outs AnyType:$out);
+  let assemblyFormat = [{ $in attr-dict `:` type($in) `->` type($out) }];
+  let hasFolder = 1;
+}
+
+// Internal operation.
+def TPU_TruncFOp : TPU_Op<"truncf", [Pure, ElementwiseMappable]> {
+  let arguments = (
+    ins AnyType:$in,
+    TPU_RoundingModeEnum:$rounding_mode
+  );
+  let results = (outs AnyType:$out);
+  let assemblyFormat = [{ $in attr-dict `:` type($in) `->` type($out) }];
+  let hasFolder = 1;
 }
 
 def TPU_DotDimensionNumbersAttr : TPU_Attr<"DotDimensionNumbers", "dot_dimension_numbers"> {
@@ -863,6 +883,9 @@ def TPU_EnqueueIndirectDMAOp : TPU_Op<"enqueue_indirect_dma"> {
   );
   let hasVerifier = 1;
   let extraClassDeclaration = [{
+    // Return true if this op performs a gather. Returns false if it performs a
+    // scatter.
+    FailureOr<bool> isGather();
     LogicalResult verifyGather(MemRefType operand_ty,
                                ArrayRef<int64_t> offsets_shape,
                                MemRefType result_ty);

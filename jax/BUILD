@@ -296,9 +296,6 @@ py_library_providing_imports_info(
     srcs = [
         "_src/__init__.py",
         "_src/blocked_sampler.py",
-        "_src/checkify.py",
-        "_src/debugging.py",
-        "_src/dlpack.py",
         "_src/interpreters/__init__.py",
         "_src/prng.py",
         "_src/random.py",
@@ -308,7 +305,6 @@ py_library_providing_imports_info(
             "_src/debugger/**/*.py",
             "_src/image/**/*.py",
             "_src/nn/**/*.py",
-            "_src/ops/**/*.py",
             "_src/scipy/**/*.py",
             "_src/third_party/**/*.py",
             "_src/tpu/**/*.py",
@@ -330,7 +326,6 @@ py_library_providing_imports_info(
             "_src/internal_test_util/**",
         ],
     ) + [
-        "experimental/attrs.py",
         "experimental/pjit.py",
         "experimental/multihost_utils.py",
         "experimental/shard_map.py",
@@ -355,11 +350,11 @@ py_library_providing_imports_info(
         ":ad_util",
         ":api",
         ":api_util",
-        ":attrs",
         ":basearray",
         ":batching",
         ":buffer_callback",
         ":callback",
+        ":checkify",
         ":cloud_tpu_init",
         ":compilation_cache_internal",
         ":compiler",
@@ -374,7 +369,9 @@ py_library_providing_imports_info(
         ":custom_partitioning",
         ":custom_partitioning_sharding_rule",
         ":custom_transpose",
+        ":debugging",
         ":deprecations",
+        ":dlpack",
         ":dtypes",
         ":earray",
         ":effects",
@@ -460,7 +457,6 @@ pytype_strict_library(
         ":abstract_arrays",
         ":ad",
         ":api_util",
-        ":attrs",
         ":basearray",
         ":batching",
         ":compiler",
@@ -469,6 +465,7 @@ pytype_strict_library(
         ":deprecations",
         ":dtypes",
         ":effects",
+        ":jaxpr_util",
         ":layout",
         ":mesh",
         ":mlir",
@@ -506,22 +503,6 @@ pytype_strict_library(
         ":tree_util",
         ":util",
     ] + py_deps("numpy"),
-)
-
-pytype_strict_library(
-    name = "attrs",
-    srcs = ["_src/attrs.py"],
-    deps = [
-        ":ad",
-        ":ad_util",
-        ":api_util",
-        ":core",
-        ":dtypes",
-        ":partial_eval",
-        ":source_info_util",
-        ":tree_util",
-        ":util",
-    ],
 )
 
 pytype_strict_library(
@@ -576,6 +557,38 @@ pytype_strict_library(
         ":xla",
         ":xla_bridge",
         "//jax/_src/lib",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
+    name = "checkify",
+    srcs = ["_src/checkify.py"],
+    visibility = [":internal"] + jax_visibility("checkify"),
+    deps = [
+        ":ad",
+        ":ad_util",
+        ":api",
+        ":api_util",
+        ":batching",
+        ":callback",
+        ":config",
+        ":core",
+        ":custom_derivatives",
+        ":dtypes",
+        ":effects",
+        ":lax",
+        ":mesh",
+        ":mlir",
+        ":numpy",
+        ":partial_eval",
+        ":partition_spec",
+        ":shard_map",
+        ":sharding_impls",
+        ":source_info_util",
+        ":traceback_util",
+        ":tree_util",
+        ":typing",
+        ":util",
     ] + py_deps("numpy"),
 )
 
@@ -640,7 +653,6 @@ py_library_providing_imports_info(
         ":ad_util",
         ":api",
         ":api_util",
-        ":attrs",
         ":batching",
         ":callback",
         ":config",
@@ -854,8 +866,51 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "debugging",
+    srcs = [
+        "_src/debugging.py",
+    ],
+    deps = [
+        ":ad",
+        ":api",
+        ":batching",
+        ":callback",
+        ":config",
+        ":core",
+        ":effects",
+        ":lax",
+        ":mesh",
+        ":mlir",
+        ":numpy",
+        ":partial_eval",
+        ":shard_map",
+        ":sharding",
+        ":sharding_impls",
+        ":tree_util",
+        ":util",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
+)
+
+pytype_strict_library(
     name = "deprecations",
     srcs = ["_src/deprecations.py"],
+)
+
+pytype_strict_library(
+    name = "dlpack",
+    srcs = ["_src/dlpack.py"],
+    deps = [
+        ":api",
+        ":deprecations",
+        ":lax",
+        ":numpy",
+        ":sharding",
+        ":typing",
+        ":xla_bridge",
+        "//jax/_src/lib",
+    ] + py_deps("numpy"),
 )
 
 pytype_strict_library(
@@ -1015,7 +1070,9 @@ pytype_strict_library(
     name = "jaxpr_util",
     srcs = ["_src/jaxpr_util.py"],
     deps = [
+        ":config",
         ":core",
+        ":path",
         ":source_info_util",
         ":util",
         "//jax/_src/lib",
@@ -1571,9 +1628,8 @@ py_library_providing_imports_info(
     name = "numpy",
     srcs = glob([
         "_src/numpy/**/*.py",
-    ]) + [
-        "_src/ops/scatter.py",
-    ],
+        "_src/ops/**/*.py",
+    ]),
     deps = [
         ":api",
         ":api_util",

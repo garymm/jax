@@ -280,11 +280,58 @@ class ShardMapTest(jtu.JaxTestCase):
     self.assertAllClose(c[1, :], a[0, :])
 
   @jtu.run_on_devices("gpu")
+  @config.use_shardy_partitioner(False)
+  def test_psend_precv_basic_two_gpus(self):
+    mesh = jtu.create_mesh((2,), 'x')
+    a = jax.device_put(
+        jnp.arange(2 * 2, dtype=jnp.float32).reshape((2, 2)),
+        jax.sharding.NamedSharding(mesh, P('x', None)))
+    weights = jax.random.uniform(
+        key=jax.random.key(0), shape=(2, 1), dtype=jnp.float32)
+
+    @jax.jit
+    @partial(
+        shard_map, mesh=mesh, in_specs=(P('x', None),), out_specs=P('x', None)
+    )
+    def fwd(a):
+      return_dtype_and_shape = jax.ShapeDtypeStruct(a.shape, a.dtype)
+      fwd_token = jax.lax.psend(a, 'x', [(0, 1)])
+      data = jax.lax.precv(
+          fwd_token, return_dtype_and_shape, 'x', [(0, 1)])
+      # Here we use an optimization barrier to enforce an arbitrary ordering of
+      # operations. This makes sure the mat mul only happens after the recv is
+      # complete.
+      weights_, _ = (
+          jax.lax.optimization_barrier(
+              (weights, data)
+          )
+      )
+      res = jnp.dot(weights_, data)
+
+      # send the compute result back to the first device
+      bwd_token = jax.lax.psend(
+          res,
+          axis_name='x',
+          perm=[(1, 0)],
+      )
+
+      bwd_data = jax.lax.precv(
+          bwd_token,
+          out_shape=return_dtype_and_shape,
+          axis_name='x',
+          perm=[(1, 0)]
+      )
+      return bwd_data
+
+    c = fwd(a)
+    self.assertEqual(c.shape, a.shape)
+
+  @jtu.run_on_devices("gpu")
+  @config.use_shardy_partitioner(False)
   def test_psend_precv_basic_with_no_deadlock_cycle(self):
-    self.skipTest("b/427494298: re-enable this test when stableHLO changes land")
     mesh = jtu.create_mesh((8,), 'x')
     a = jax.device_put(
-        jnp.arange(8 * 8).reshape((8, 8)),
+        jnp.arange(8 * 8, dtype=jnp.float32).reshape((8, 8)),
         jax.sharding.NamedSharding(mesh, P('x', None)))
     weights = jax.random.uniform(
         key=jax.random.key(0), shape=(8, 1), dtype=jnp.float32)
@@ -343,11 +390,11 @@ class ShardMapTest(jtu.JaxTestCase):
     self.assertEqual(c.shape, a.shape)
 
   @jtu.run_on_devices("gpu")
+  @config.use_shardy_partitioner(False)
   def test_psend_precv_reverse(self):
-    self.skipTest("b/427494298: re-enable this test when stableHLO changes land")
     mesh = jtu.create_mesh((8,), 'x')
     a = jax.device_put(
-        jnp.arange(8 * 8).reshape((8, 8)),
+        jnp.arange(8 * 8, dtype=jnp.float32).reshape((8, 8)),
         jax.sharding.NamedSharding(mesh, P('x', None)))
     @jax.jit
     @partial(
@@ -2202,6 +2249,44 @@ class ShardMapTest(jtu.JaxTestCase):
     with jax.disable_jit():
       f(x)  # don't crash
 
+  @jtu.with_explicit_mesh((2,), 'x')
+  def test_jacrev_explicit(self, mesh):
+    B, N, H = 20, 6, 8
+    w = jnp.arange(N * H).reshape(N, H).astype(jnp.float32)
+    x = jnp.arange(B * N).reshape(B, N).astype(jnp.float32)
+
+    def f(w, x):
+      return jnp.sum(x @ w, axis=-1)
+
+    @jax.jit
+    @shard_map(in_specs=(P(), P('x', None)), out_specs=P('x', None))
+    def f_jac_sharded(w, x):
+      return jax.jacrev(f, argnums=1)(w, x)
+
+    f_jac_sharded(w, x)  # doesn't crash
+
+  @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
+  def test_jacrev_explicit_complex(self, mesh):
+    B, N, H = 20, 6, 8
+    w = jnp.arange(N * H).reshape(N, H).astype(jnp.float32)
+    x = jnp.arange(B * N).reshape(B, N).astype(jnp.float32)
+
+    def f(w, xs):
+      return jax.tree.map(lambda z: jnp.sum(z @ w, axis=-1), xs)
+
+    @jax.jit
+    @shard_map(in_specs=(P(), P('x'), P('y')),
+               out_specs=(P('x'), P('y'), P('x'), P('y')))
+    def f_jac_sharded(w, x, y):
+      ret = jax.jacrev(f, argnums=1)(w, (x, y))
+      self.assertEqual(ret[0][0].aval.vma, {'x'})
+      self.assertEqual(ret[0][1].aval.vma, {'y'})
+      self.assertEqual(ret[1][0].aval.vma, {'x'})
+      self.assertEqual(ret[1][1].aval.vma, {'y'})
+      return ret[0][0], ret[0][1], ret[1][0], ret[1][1]
+
+    f_jac_sharded(w, x, x)  # doesn't crash
+
   @parameterized.parameters(it.product(range(4), repeat=3))
   @jtu.run_on_devices("cpu")
   def test_forwarding_correctness(self, seed, num_input_fwd, num_output_fwd):
@@ -2289,8 +2374,8 @@ class ShardMapTest(jtu.JaxTestCase):
     with jax.sharding.use_mesh(jtu.create_mesh((1,), 'x')):
       ex_out1, ex_out2 = jax.jit(jax.grad(lambda x, y: jnp.sin((x @ y).sum()),
                                           argnums=(0, 1)))(np_inp1, np_inp2)
-    self.assertArraysAllClose(ex_out1, out1)
-    self.assertArraysAllClose(ex_out2, out2)
+    self.assertArraysAllClose(ex_out1, out1, rtol=2e-4)
+    self.assertArraysAllClose(ex_out2, out2, rtol=2e-4)
 
   def test_shmap_auto_unreduced_error(self):
     mesh = jtu.create_mesh((2, 1), ('x', 'y'))

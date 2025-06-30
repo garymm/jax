@@ -1069,7 +1069,7 @@ def lower_fun(fun: Callable, *, multiple_results: bool) -> Callable:
         f, params,
         debug_info=api_util.debug_info("mosaic lower_fun", f,
                                        args, params))
-    jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_fun, ctx.avals_in)
+    jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, ctx.avals_in)
     if consts:
       raise NotImplementedError
     jaxpr = pe.convert_constvars_jaxpr(jaxpr)
@@ -1140,10 +1140,9 @@ def jaxpr_subcomp(
   current_name_stack.extend(initial_name_stack)
   for eqn in jaxpr.eqns:
     invals = map(read_env, eqn.invars)
-    source_info = eqn.source_info.replace(
-        name_stack=ctx.name_stack + eqn.source_info.name_stack
-    )
-    loc = mlir._source_info_to_location(ctx, eqn.primitive, source_info)
+    eqn_name_stack = ctx.name_stack + eqn.source_info.name_stack
+    loc = mlir.source_info_to_location(
+        ctx, eqn.primitive, eqn_name_stack, eqn.source_info.traceback)
     with (source_info_util.user_context(eqn.source_info.traceback), loc,
           eqn.ctx.manager):
       if eqn.primitive in lowering_rules[ctx.kernel_type]:
@@ -1159,7 +1158,7 @@ def jaxpr_subcomp(
         )
 
         # Insert trace_start and trace_stop ops on named_scope boundaries.
-        name_stack = [scope.name for scope in source_info.name_stack.stack]
+        name_stack = [scope.name for scope in eqn_name_stack.stack]
         popped, pushed = _compute_name_stack_updates(
             current_name_stack, name_stack)
         current_name_stack = name_stack
@@ -1183,8 +1182,8 @@ def jaxpr_subcomp(
           new_error = LoweringException(msg)
           # We insert the traceback here so that the user code shows
           # up in the traceback for the post-transform error.
-          if source_info.traceback is not None:
-            tb = source_info.traceback.as_python_traceback()
+          if eqn.source_info.traceback is not None:
+            tb = eqn.source_info.traceback.as_python_traceback()
             new_error.__traceback__ = traceback_util.filter_traceback(tb)
           raise new_error from e
       else:
@@ -2262,9 +2261,16 @@ def _convert_element_type_lowering_rule(
   signed = jnp.signedinteger
   both_32bit = old_dtype.itemsize == 4 and new_dtype.itemsize == 4
   if _from(floating) and _to(floating):
-    if old_dtype.itemsize < new_dtype.itemsize and new_dtype.itemsize == 4:
+    forward_compat = ctx.forward_compatible or is_cloud_tpu_older_than(
+        2025, 6, 29
+    )
+    if old_dtype.itemsize < new_dtype.itemsize and (
+        new_dtype.itemsize == 4 or not forward_compat
+    ):
       return arith.extf(out_type, x)
-    elif old_dtype.itemsize > new_dtype.itemsize and old_dtype.itemsize == 4:
+    elif old_dtype.itemsize > new_dtype.itemsize and (
+        old_dtype.itemsize == 4 or not forward_compat
+    ):
       return arith.truncf(out_type, x)
   elif _from(integer) and _to(integer):
     if old_dtype.itemsize < new_dtype.itemsize and new_dtype.itemsize == 4:

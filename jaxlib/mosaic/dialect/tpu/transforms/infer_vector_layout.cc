@@ -150,7 +150,7 @@ class VectorLayoutInferer {
           any_op.emitOpError("Multi-result ops not supported");
           return failure();
         }
-      } else if (isa<arith::ExtFOp, arith::ExtSIOp>(any_op)) {
+      } else if (isa<arith::ExtSIOp, tpu::ExtFOp>(any_op)) {
         if (inferExt(&any_op).failed()) {
           return failure();
         }
@@ -162,7 +162,7 @@ class VectorLayoutInferer {
         if (inferExt(&any_op).failed()) {
           return failure();
         }
-      } else if (isa<arith::TruncFOp, arith::TruncIOp>(any_op)) {
+      } else if (isa<arith::TruncIOp, tpu::TruncFOp>(any_op)) {
         if (inferTrunc(&any_op).failed()) {
           return failure();
         }
@@ -971,19 +971,19 @@ class VectorLayoutInferer {
     // offset but since we are forcing all operands and result to be the same
     // layout, we can set all offsets to zero for now. Also maybe we should
     // consider adding this to elementwise rule.
-    if (op.getType().getShape() == ArrayRef<int64_t>(target_shape_) &&
-        op.getType().getElementTypeBitWidth() == 32) {
-      VectorLayout layout(kNativeBitwidth, {0, 0}, default_tiling_,
-                          ImplicitDim::kNone);
-      setLayout(op, {layout, layout}, layout);
-    } else if (op.getIndices().getType().getShape() ==
-                   ArrayRef<int64_t>{4 * target_shape_[0], target_shape_[1]} &&
-               op.getType().getElementTypeBitWidth() == 8) {
-      VectorLayout layout(8, {0, 0}, nativeTiling(8), ImplicitDim::kNone);
-      setLayout(op, {layout, layout}, layout);
-    } else {
-      return op.emitOpError("Not implemented");
+    const int bitwidth = op.getType().getElementTypeBitWidth();
+    if (bitwidth != 8 && bitwidth != 16 && bitwidth != 32) {
+      return op.emitOpError(
+          "Not implemented: Only 8-, 16- or 32-bit gathers supported");
     }
+    if (bitwidth != op.getIndices().getType().getElementTypeBitWidth()) {
+      return op.emitOpError(
+          "Not implemented: Gather indices and result have different "
+          "bitwidths");
+    }
+    VectorLayout layout(bitwidth, {0, 0}, nativeTiling(bitwidth),
+                        ImplicitDim::kNone);
+    setLayout(op, {layout, layout}, layout);
     return success();
   }
 
@@ -1724,8 +1724,10 @@ class VectorLayoutInferer {
     unsigned dst_bitwidth = dst_ty.getElementTypeBitWidth();
     auto some_layout = getLayout(op->getOperand(0));
     TPU_CHECK_OP(some_layout.has_value(), "missing vector layout");
-    if (dyn_cast<arith::ExtFOp>(op)) {
-      TPU_CHECK_OP(dst_bitwidth == 32, "Only supported extensions to 32-bit");
+    if (isa<tpu::ExtFOp>(op)) {
+      TPU_CHECK_OP(dst_bitwidth == 32 || dst_bitwidth == 16,
+                   "Only supported extensions to 32-bit (float32) or 16-bit "
+                   "(bfloat16)");
     }
     auto &layout = *some_layout;
     Layout src_layout;
