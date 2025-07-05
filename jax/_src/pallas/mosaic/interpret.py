@@ -27,6 +27,7 @@ import jax
 from jax import lax
 from jax._src import callback
 from jax._src import core as jax_core
+from jax._src import frozen_dict
 from jax._src.lax.control_flow import for_loop
 from jax._src import linear_util as lu
 from jax._src import source_info_util
@@ -1615,14 +1616,20 @@ def _interpret_jaxpr(
             target_device_id, eqn.params['device_id_type'], axis_sizes)
         (orig_src_ref, _, orig_dst_ref, *_
         ) = jax.tree.unflatten(eqn.params['tree'], eqn.invars)
+        src_memory_space = getattr(orig_src_ref.aval, 'memory_space', None)
+        if src_memory_space is None:
+          src_memory_space = mosaic_core.MemorySpace.ANY
+        dst_memory_space = getattr(orig_dst_ref.aval, 'memory_space', None)
+        if dst_memory_space is None:
+          dst_memory_space = mosaic_core.MemorySpace.ANY
         callback.io_callback(
             functools.partial(dma_start, source_info=eqn.source_info),
             (),
             device_id,
             local_core_id,
-            TPU_MEMORY_SPACE_IDXS[getattr(orig_src_ref.aval, 'memory_space', mosaic_core.MemorySpace.ANY)],
+            TPU_MEMORY_SPACE_IDXS[src_memory_space],
             src, src_transforms,
-            TPU_MEMORY_SPACE_IDXS[getattr(orig_dst_ref.aval, 'memory_space', mosaic_core.MemorySpace.ANY)],
+            TPU_MEMORY_SPACE_IDXS[dst_memory_space],
             dst, dst_transforms,
             state_discharge.transform_array(dst_sem, dst_sem_transforms),
             state_discharge.transform_array(src_sem, src_sem_transforms),
@@ -1998,8 +2005,10 @@ def interpret_pallas_call(
     cost_estimate: CostEstimate,
     out_avals: tuple[jax_core.AbstractValue, ...],
     interpret_params: InterpretParams,
+    metadata: frozen_dict.FrozenDict[str, str] | None,
 ):
   del debug, cost_estimate, out_avals
+  del metadata  # TODO(sharadmv): Add metadata to HLO.
 
   if isinstance(mesh, mosaic_core.TensorCoreMesh):
     # As a convenience for users, if we are interpreting a pl.core_map over a

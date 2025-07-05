@@ -48,6 +48,7 @@ from jax._src.numpy import reductions
 from jax._src.numpy import ufuncs
 from jax._src.pjit import PartitionSpec
 from jax._src.sharding import Sharding
+from jax._src import mesh as mesh_lib
 from jax._src.sharding_impls import canonicalize_sharding, NamedSharding
 from jax._src.ops import scatter
 from jax._src.typing import Array, ArrayLike, DimSize, DTypeLike, Shape, StaticScalar
@@ -658,6 +659,17 @@ def _chunk_iter(x, size):
 def _getitem(self, item):
   return indexing.rewriting_take(self, item)
 
+def _val_sharding(val):
+  cur_mesh = mesh_lib.get_abstract_mesh()
+  val_s = core.typeof(val).sharding
+  if val_s.mesh._are_all_axes_auto_or_manual:
+    return None
+  if val_s.mesh.empty:
+    return (NamedSharding(cur_mesh, PartitionSpec())
+            if cur_mesh._are_all_axes_explicit else None)
+  return val_s
+
+
 # Syntactic sugar for scatter operations.
 class _IndexUpdateHelper:
   # Note: this docstring will appear as the docstring for the `at` property.
@@ -827,13 +839,11 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    out_s = core.typeof(self.array).sharding
-    if out_s.mesh.empty or out_s.mesh._are_all_axes_auto_or_manual:
-      out_s = None
-    return scatter._scatter_update(self.array, self.index, values, lax_slicing.scatter,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices, mode=mode,
-                                   out_sharding=out_s, normalize_indices=wrap_negative_indices)
+    out_s = _val_sharding(self.array)
+    return scatter._scatter_update(
+        self.array, self.index, values, lax_slicing.scatter,
+        indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+        mode=mode, out_sharding=out_s, normalize_indices=wrap_negative_indices)
 
   def apply(self, func: Callable[[ArrayLike], Array], *,
             indices_are_sorted: bool = False, unique_indices: bool = False,
@@ -854,12 +864,10 @@ class _IndexUpdateRef:
     """
     def _scatter_apply(x, indices, y, dims, **kwargs):
       return lax_slicing.scatter_apply(x, indices, func, dims, update_shape=y.shape, **kwargs)
-    return scatter._scatter_update(self.array, self.index,
-                                   lax._zero(self.array),
-                                   _scatter_apply,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices, mode=mode,
-                                   normalize_indices=wrap_negative_indices)
+    return scatter._scatter_update(
+        self.array, self.index, lax._zero(self.array), _scatter_apply,
+        indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+        mode=mode, normalize_indices=wrap_negative_indices)
 
   def add(self, values: ArrayLike, *,
           indices_are_sorted: bool = False, unique_indices: bool = False,
@@ -872,11 +880,11 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    return scatter._scatter_update(self.array, self.index, values,
-                                   lax_slicing.scatter_add,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices, mode=mode,
-                                   normalize_indices=wrap_negative_indices)
+    out_s = _val_sharding(self.array)
+    return scatter._scatter_update(
+        self.array, self.index, values, lax_slicing.scatter_add,
+        indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+        mode=mode, normalize_indices=wrap_negative_indices, out_sharding=out_s)
 
   def subtract(self, values: ArrayLike, *,
                indices_are_sorted: bool = False, unique_indices: bool = False,

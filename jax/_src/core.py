@@ -179,6 +179,10 @@ class Jaxpr:
     return p.text(self.pretty_print(use_color=True))
 
   def replace(self, **kwargs):
+    # TODO(mattjj,necula): enable to find places we mess up debug_info
+    # if "debug_info" not in kwargs:
+    #   if "invars" in kwargs or "outvars" in kwargs:
+    #     raise ValueError("must update debug info")
     jaxpr = Jaxpr(
         constvars=kwargs.pop("constvars", self.constvars),
         invars=kwargs.pop("invars", self.invars),
@@ -396,6 +400,12 @@ class JaxprEqn:
   primitive: Primitive
   params: dict[str, Any]
   effects: Effects
+
+  # The source_info.name_stack is always relative to the enclosing jaxpr (only)
+  # and does not include any name context from the caller of the jaxpr. A jaxpr
+  # might have multiple callers, after all.
+  # TODO(phawkins): update source_info.tracebacks to also be relative to the
+  # enclosing jaxpr.
   source_info: source_info_util.SourceInfo
   ctx: JaxprEqnContext
 
@@ -544,6 +554,8 @@ class Primitive:
   ref_primitive: bool = False
   # set for primitives that can skip canonicalization of values
   skip_canonicalization: bool = False
+
+  is_effectful = None
 
   def __init__(self, name: str):
     self.name = name
@@ -2413,6 +2425,7 @@ pytype_aval_mappings[MutableArray] = lambda x: x._aval
 def mutable_array(init_val):
   return mutable_array_p.bind(init_val)
 mutable_array_p = Primitive('mutable_array')
+mutable_array_p.is_effectful = lambda params: True  # type: ignore
 mutable_array_p.ref_primitive = True
 
 class InternalMutableArrayEffect(effects.Effect):
@@ -2434,6 +2447,7 @@ def _mutable_array_impl(init_val):
 def freeze(ref):
   return freeze_p.bind(ref)
 freeze_p = Primitive('freeze')
+freeze_p.is_effectful = lambda params: True  # type: ignore
 freeze_p.ref_primitive = True
 
 @freeze_p.def_effectful_abstract_eval
@@ -3062,6 +3076,13 @@ def _check_jaxpr(
       else:
         env[v] = MutableTypecheckVal(aval, MutableQuasiDynamicData(qdd))
 
+  # # Don't return refs
+  if config.mutable_array_checks.value:
+    from jax._src.state.types import AbstractRef  # pytype: disable=import-error
+    for v in jaxpr.outvars:
+      if isinstance(v.aval, AbstractRef):
+        raise JaxprTypeError("returned a ref!")
+
   # Check type annotations on lambda binders.
   for v in it.chain(jaxpr.constvars, jaxpr.invars):
     check_type(ctx_factory, env, v.aval)
@@ -3225,7 +3246,7 @@ def _check_call(ctx_factory, prim, in_atoms, params):
                            f"{substitute(v.aval)}")
     env[v] = x.val if type(x) is Literal else x
 
-  _check_jaxpr(ctx_factory, call_jaxpr)
+  check_jaxpr(call_jaxpr)
 
   invars, outvars = call_jaxpr.invars, call_jaxpr.outvars
   in_map : dict[Var,  InDBIdx] = {v:  InDBIdx(i) for i, v in enumerate( invars)}
@@ -3442,7 +3463,7 @@ def pp_eqn(eqn: JaxprEqn, context: JaxprPpContext, settings: JaxprPpSettings
   rule = (_pp_eqn if not settings.custom_pp_eqn_rules else
           pp_eqn_rules.get(eqn.primitive, _pp_eqn))
   doc = rule(eqn, context, settings)
-  user_frame = source_info_util.user_frame(eqn.source_info)
+  user_frame = source_info_util.user_frame(eqn.source_info.traceback)
   return doc if user_frame is None else pp.source_map(doc, user_frame)
 
 def _pp_eqn(eqn: JaxprEqn, context: JaxprPpContext, settings: JaxprPpSettings,

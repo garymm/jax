@@ -14,32 +14,33 @@
 
 """Test TPU-specific extensions to pallas_call."""
 
+from collections.abc import Callable
 import contextlib
 import functools
-import itertools
 import gc
 import io
+import itertools
+import json
 import math
 import re
 import sys
-from collections.abc import Callable
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import api_util
 from jax import lax
 from jax._src import checkify
+from jax._src import shard_map
 from jax._src import state
 from jax._src import test_util as jtu
 from jax._src.interpreters import partial_eval as pe
 from jax._src.lib import _jax
 from jax._src.pallas.pallas_call import _trace_kernel_to_jaxpr
-from jax._src.state import utils as state_utils
 from jax._src.state import discharge as state_discharge
+from jax._src.state import utils as state_utils
 from jax.experimental import mesh_utils
 from jax.experimental import mosaic
 from jax.experimental import pallas as pl
-from jax._src import shard_map
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas.ops.tpu import example_kernel
 from jax.extend import linear_util as lu
@@ -52,6 +53,25 @@ jax.config.parse_flags_with_absl()
 P = jax.sharding.PartitionSpec
 
 partial = functools.partial
+
+
+def only_passes_in_interpret(
+    unless_generation: int | None = None, *args, **kwargs
+):
+  def decorator(f, *args, **kwargs):
+    def wrapper(self, *args, **kwargs):
+      if self.INTERPRET or (
+          unless_generation is not None
+          and jtu.is_device_tpu_at_least(unless_generation)
+      ):
+        f(self, *args, **kwargs)
+      else:
+        with self.assertRaises(Exception):
+          f(self, *args, **kwargs)
+
+    return wrapper
+
+  return decorator
 
 
 @contextlib.contextmanager
@@ -162,6 +182,43 @@ class PallasCallScalarPrefetchTest(PallasBaseTest):
         ),
     )(s, x)
     np.testing.assert_allclose(out, x.reshape((8, 8, -1))[s].reshape(x.shape))
+
+  @parameterized.parameters(
+      (jnp.bfloat16,),
+      (jnp.int8,),
+  )
+  @only_passes_in_interpret()
+  def test_narrow_bitwidth_scalar_prefetch(self, dtype):
+    def body(s_ref, x_ref, o_ref):
+      o_ref[...] = x_ref[...] + jnp.broadcast_to(s_ref[0], x_ref.shape)
+
+    s = jnp.array([5], dtype)
+    x = jnp.arange(16 * 128, dtype=dtype).reshape((16, 128))
+
+    out = self.pallas_call(
+        body,
+        out_shape=jax.ShapeDtypeStruct(x.shape, dtype),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=1,
+        ),
+    )(s, x)
+    jtu.check_close(out, x + jnp.broadcast_to(s, x.shape))
+
+  def test_f32_scalar_prefetch(self):
+    def body(s_ref, x_ref, o_ref):
+      o_ref[...] = x_ref[...] + jnp.broadcast_to(s_ref[0], x_ref.shape)
+
+    s = jnp.array([5.0], jnp.float32)
+    x = jnp.arange(8 * 128, dtype=jnp.float32).reshape((8, 128))
+
+    out = self.pallas_call(
+        body,
+        out_shape=jax.ShapeDtypeStruct(x.shape, jnp.float32),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=1,
+        ),
+    )(s, x)
+    np.testing.assert_allclose(out, x + jnp.broadcast_to(s, x.shape))
 
   def test_trivial_scalar_prefetch_with_windowless_args(self):
     def body(_, x_ref, o_ref):
@@ -803,7 +860,7 @@ class PallasCallDMATest(PallasBaseTest):
       pl.run_scoped(body, pltpu.VMEM((8,), jnp.float32))
       return []
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
         wrap_init(kernel, 2),
         [
             state.shaped_array_ref((8,), jnp.float32),
@@ -934,8 +991,7 @@ class PallasCallDMATest(PallasBaseTest):
     aref1 = state.AbstractRef(jax.core.ShapedArray((4,), jnp.dtype('float32')))
     aref2 = state.AbstractRef(jax.core.ShapedArray((4,), jnp.dtype('float32')))
     in_avals = [aref1, aref2]
-    stateful_jaxpr, _, (), () = pe.trace_to_jaxpr_dynamic(wrap_init(f, 2),
-                                                          in_avals)
+    stateful_jaxpr, _, () = pe.trace_to_jaxpr_dynamic(wrap_init(f, 2), in_avals)
     discharged_jaxpr, _ = state_discharge.discharge_state(
         stateful_jaxpr, consts=(), should_discharge=[False, True])
     self.assertLen(discharged_jaxpr.invars, 2)
@@ -1968,11 +2024,14 @@ class PallasCallTest(PallasBaseTest):
           ),
       )(x)
 
-  @parameterized.product(dtype=[jnp.bfloat16, jnp.float32])
-  def test_pltpu_repeat(self, dtype):
+  @parameterized.product(
+    dtype=[jnp.bfloat16, jnp.float32],
+    axis=[1, -1],
+  )
+  def test_pltpu_repeat(self, dtype, axis):
     def test_kernel(x_ref, o_ref):
       x = x_ref[...]
-      o_ref[...] = pltpu.repeat(x, 2, axis=1)
+      o_ref[...] = pltpu.repeat(x, 2, axis=axis)
 
     @jax.jit
     def test(x: jax.Array) -> jax.Array:
@@ -2308,15 +2367,22 @@ class PallasCallRefTransformTest(PallasBaseTest):
     )
     np.testing.assert_array_equal(y, expected)
 
-  @parameterized.product(slice_first=[True, False])
-  def test_load_bitcasted_ref(self, slice_first: bool):
+  @parameterized.product(
+      slice_first=[True, False], use_primitive_io_op=[False, True]
+  )
+  def test_load_bitcasted_ref(
+      self, slice_first: bool, use_primitive_io_op: bool
+  ):
     def kernel(x_ref, y_ref):
       ref = (
           x_ref.at[:8, :128].bitcast(jnp.int16)
           if slice_first
           else x_ref.bitcast(jnp.int16).at[:16, :128]
       )
-      y_ref[...] = ref[...]
+      if use_primitive_io_op:
+        pl.store(y_ref, ..., pl.load(ref, ...))
+      else:
+        y_ref[...] = ref[...]
 
     x = jnp.arange(4 * 8 * 128, dtype=jnp.int32).reshape((16, 256))
     y = self.pallas_call(
@@ -2330,15 +2396,22 @@ class PallasCallRefTransformTest(PallasBaseTest):
     )
     np.testing.assert_array_equal(y, expected)
 
-  @parameterized.product(slice_first=[True, False])
-  def test_store_bitcasted_ref(self, slice_first):
+  @parameterized.product(
+      slice_first=[True, False], use_primitive_io_op=[False, True]
+  )
+  def test_store_bitcasted_ref(
+      self, slice_first: bool, use_primitive_io_op: bool
+  ):
     def kernel(x_ref, y_ref):
       ref = (
           y_ref.at[:8, :128].bitcast(jnp.bfloat16)
           if slice_first
           else y_ref.bitcast(jnp.bfloat16).at[:16, :128]
       )
-      ref[...] = x_ref[...]
+      if use_primitive_io_op:
+        pl.store(ref, ..., pl.load(x_ref, ...))
+      else:
+        ref[...] = x_ref[...]
 
     x = jnp.arange(16 * 128, dtype=jnp.bfloat16).reshape((16, 128))
     y = self.pallas_call(
@@ -2828,26 +2901,14 @@ class PrettyPrintingTest(PallasBaseTest):
       )
       return []
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
-        wrap_init(body, 2), [state.shaped_array_ref((2, 8, 128), jnp.int32),
-                             jax.core.ShapedArray((), jnp.int32)]
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
+        wrap_init(body, 2),
+        [
+            state.shaped_array_ref((2, 8, 128), jnp.int32),
+            jax.core.ShapedArray((), jnp.int32),
+        ],
     )
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
-
-
-def only_passes_in_interpret(unless_generation: int | None = None):
-  def decorator(f):
-    def wrapper(self):
-      if self.INTERPRET or (
-          unless_generation is not None
-          and jtu.is_device_tpu_at_least(unless_generation)
-      ):
-        f(self)
-      else:
-        with self.assertRaises(Exception):
-          f(self)
-    return wrapper
-  return decorator
 
 
 class MiscellaneousTest(PallasBaseTest):
@@ -2957,9 +3018,9 @@ class MiscellaneousTest(PallasBaseTest):
           kernel, out_shape=jax.ShapeDtypeStruct((128, 64), jnp.float32)
       )(x)
 
-  @only_passes_in_interpret()
   def test_retiling1(self):
-    """b/352626602"""
+    if not jtu.if_cloud_tpu_at_least(2025, 7, 2):
+      self.skipTest('Needs a newer libtpu')
     x = np.arange(1024, dtype=jnp.bfloat16).reshape(1024)
 
     def kernel(x_ref, out_ref):
@@ -3283,6 +3344,33 @@ class MiscellaneousTest(PallasBaseTest):
 
 class MiscellaneousInterpretTest(MiscellaneousTest):
   INTERPRET: bool = True
+
+
+class PallasKernelMetadataTest(PallasBaseTest):
+
+  @parameterized.parameters(
+      (dict(foo='bar'),),
+      (dict(foo='afjafo'),),
+      (dict(problem_info=json.dumps(dict(tiling_info=dict(bm=128, bk=128)))),),
+  )
+  def test_metadata_is_preserved(self, metadata):
+
+    def kernel(x_ref, y_ref, out_ref):
+      out_ref[...] = x_ref[...] + y_ref[...]
+
+    x = jnp.arange(1024, dtype=jnp.float32).reshape((8, 128))
+    y = jnp.arange(1024, dtype=jnp.float32).reshape((8, 128))
+
+    @jax.jit
+    def f(x, y):
+      return self.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          metadata=metadata,
+      )(x, y)
+
+    hlo = f.lower(x, y).compile().as_text()
+    self.assertIn(json.dumps(metadata), hlo)
 
 
 if __name__ == '__main__':

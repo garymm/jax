@@ -25,10 +25,12 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
+#include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/CommonFolders.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -41,6 +43,8 @@ limitations under the License.
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Region.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
@@ -50,6 +54,33 @@ limitations under the License.
 
 namespace mlir {
 namespace tpu {
+
+namespace {
+
+llvm::RoundingMode convertTpuRoundingModeToLLVMIR(tpu::RoundingMode mode) {
+  switch (mode) {
+    case tpu::RoundingMode::kToNearestEven:
+      return llvm::RoundingMode::NearestTiesToEven;
+    case tpu::RoundingMode::kTowardsZero:
+      return llvm::RoundingMode::TowardZero;
+  }
+}
+
+// Attempts to convert `sourceValue` to an APFloat value with
+// `targetSemantics` and `roundingMode`, without any information loss.
+static FailureOr<APFloat> convertFloatValue(
+    APFloat sourceValue, const llvm::fltSemantics &targetSemantics,
+    llvm::RoundingMode roundingMode = llvm::RoundingMode::NearestTiesToEven) {
+  bool losesInfo = false;
+  auto status = sourceValue.convert(targetSemantics, roundingMode, &losesInfo);
+  if (losesInfo || status != APFloat::opOK) {
+    return failure();
+  }
+
+  return sourceValue;
+}
+
+}  // namespace
 
 LogicalResult UnrollVectorsOp::canonicalize(UnrollVectorsOp op,
                                             PatternRewriter &rewriter) {
@@ -1177,11 +1208,20 @@ LogicalResult EnqueueDMAOp::verify() {
   if (target_sem_type.getRank() != 0) {
     return emitOpError("DMA target semaphore must be rank 0");
   }
+  auto source_ty = getMemRefType(getSource());
+  auto target_ty = getMemRefType(getTarget());
+  if (source_ty.getElementType() != target_ty.getElementType()) {
+    return emitOpError("DMA source and target element type mismatch");
+  }
+  if (source_ty.getShape() != target_ty.getShape()) {
+    return emitOpError("DMA source and target shape mismatch.");
+  }
+
   if (getDeviceId() || getCoreId()) {
     if (!getSourceSemaphore()) {
       return emitOpError(
-          "DMA source semaphore must be specified when "
-          "device_id or core_id is specified");
+          "DMA source semaphore must be specified when device_id or core_id is "
+          "specified");
     }
   }
   bool is_remote = getDeviceId() || getCoreId();
@@ -1315,6 +1355,22 @@ bool HasHbmOrVmemSharedMemorySpace(MemRefType ty) {
 }
 }  // namespace
 
+FailureOr<bool> EnqueueIndirectDMAOp::isGather() {
+  const MemRefType source_ty = getMemRefType(getSource());
+  const MemRefType target_ty = getMemRefType(getTarget());
+  if (HasHbmOrVmemSharedMemorySpace(source_ty) &&
+      HasMemorySpace(target_ty, MemorySpace::kVmem)) {
+    return true;
+  }
+  if (HasMemorySpace(source_ty, MemorySpace::kVmem) &&
+      HasHbmOrVmemSharedMemorySpace(target_ty)) {
+    return false;
+  }
+  return emitOpError(
+      "The transfer must be between HBM and VMEM, or between VMEM_SHARED and "
+      "VMEM");
+}
+
 LogicalResult EnqueueIndirectDMAOp::verify() {
   FailureOr<CoreType> issuing_core = GetCoreTypeOfParentFunc(**this);
   if (failed(issuing_core)) {
@@ -1325,7 +1381,6 @@ LogicalResult EnqueueIndirectDMAOp::verify() {
         "Enqueue indirect DMA is supported only on the SC vector subcore");
   }
 
-
   const MemRefType source_ty = getMemRefType(getSource());
   const MemRefType target_ty = getMemRefType(getTarget());
 
@@ -1333,20 +1388,7 @@ LogicalResult EnqueueIndirectDMAOp::verify() {
     return emitOpError("Source and target element type mismatch");
   }
 
-  bool is_gather = false;
-  bool is_scatter = false;
-  if (HasHbmOrVmemSharedMemorySpace(source_ty) &&
-      HasMemorySpace(target_ty, MemorySpace::kVmem)) {
-    is_gather = true;
-  } else if (HasMemorySpace(source_ty, MemorySpace::kVmem) &&
-             HasHbmOrVmemSharedMemorySpace(target_ty)) {
-    is_scatter = true;
-  } else {
-    return emitOpError(
-        "The transfer must be between HBM and VMEM, or between VMEM_SHARED and "
-        "VMEM");
-  }
-  CHECK(is_gather != is_scatter);
+  FAILUREOR_ASSIGN_OR_RETURN(bool is_gather, isGather());
 
   const Value offsets = getOffsets();
   ArrayRef<int64_t> offsets_shape;
@@ -1373,7 +1415,6 @@ LogicalResult EnqueueIndirectDMAOp::verify() {
                         /*offsets_shape=*/offsets_shape,
                         /*result_ty=*/target_ty);
   }
-  CHECK(is_scatter);
   return verifyScatter(/*updates_ty=*/source_ty,
                        /*offsets_shape=*/offsets_shape,
                        /*operand_ty=*/target_ty);
@@ -1653,12 +1694,6 @@ LogicalResult PackSubelementsOp::verify() {
 }
 
 LogicalResult DynamicGatherOp::verify() {
-  if (getSource().getType() != getType()) {
-    return emitOpError("Expected source and result types must match");
-  }
-  if (getIndices().getType().getShape() != getIndices().getType().getShape()) {
-    return emitOpError("Expected indices and result shapes must match");
-  }
   const int64_t rank = getSource().getType().getRank();
   SmallVector<bool> seen(rank, false);
   for (int32_t d : getDimensions()) {
@@ -1670,6 +1705,28 @@ LogicalResult DynamicGatherOp::verify() {
     }
     seen[d] = true;
   }
+  const ArrayRef<int64_t> source_shape = getSource().getType().getShape();
+  const ArrayRef<int64_t> result_shape = getType().getShape();
+  if (source_shape.size() != result_shape.size()) {
+    return emitOpError("Source and result shapes must have the same rank");
+  }
+  for (int32_t i = 0; i < source_shape.size(); ++i) {
+    if (!seen[i] && source_shape[i] != result_shape[i]) {
+      return emitOpError(
+          "Source and result shapes must match on non-gather dimensions");
+    }
+  }
+  return success();
+}
+
+/*static*/ LogicalResult DynamicGatherOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
+    SmallVectorImpl<Type> &inferredReturnTypes) {
+  VectorType source_vty = cast<VectorType>(operands[0].getType());
+  VectorType indices_vty = cast<VectorType>(operands[1].getType());
+  inferredReturnTypes.push_back(
+      VectorType::get(indices_vty.getShape(), source_vty.getElementType()));
   return success();
 }
 
@@ -1736,6 +1793,41 @@ LogicalResult SublaneShuffleOp::verify() {
     }
   }
   return success();
+}
+
+OpFoldResult TruncFOp::fold(FoldAdaptor adaptor) {
+  auto resElemType = cast<FloatType>(getElementTypeOrSelf(getType()));
+  const llvm::fltSemantics &targetSemantics = resElemType.getFloatSemantics();
+  return constFoldCastOp<FloatAttr, FloatAttr, FloatAttr::ValueType,
+                         FloatAttr::ValueType, /*PoisonAttr=*/void>(
+      adaptor.getOperands(), getType(),
+      [this, &targetSemantics](const APFloat &a, bool &castStatus) {
+        llvm::RoundingMode llvmRoundingMode =
+            convertTpuRoundingModeToLLVMIR(getRoundingMode());
+        FailureOr<APFloat> result =
+            convertFloatValue(a, targetSemantics, llvmRoundingMode);
+        if (failed(result)) {
+          castStatus = false;
+          return a;
+        }
+        return *result;
+      });
+}
+
+OpFoldResult ExtFOp::fold(FoldAdaptor adaptor) {
+  auto resElemType = cast<FloatType>(getElementTypeOrSelf(getType()));
+  const llvm::fltSemantics &targetSemantics = resElemType.getFloatSemantics();
+  return constFoldCastOp<FloatAttr, FloatAttr, FloatAttr::ValueType,
+                         FloatAttr::ValueType, /*PoisonAttr=*/void>(
+      adaptor.getOperands(), getType(),
+      [&targetSemantics](const APFloat &a, bool &castStatus) {
+        FailureOr<APFloat> result = convertFloatValue(a, targetSemantics);
+        if (failed(result)) {
+          castStatus = false;
+          return a;
+        }
+        return *result;
+      });
 }
 
 }  // namespace tpu

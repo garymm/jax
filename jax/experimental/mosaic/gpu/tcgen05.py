@@ -36,6 +36,7 @@ from .launch_context import LaunchContext
 TMEM_ROWS = 128
 TCGEN05_SMEM_DESCRIPTOR_BIT = 1 << 46
 LAYOUT = fa.TCGEN05_LAYOUT
+TRANSPOSED_LAYOUT = fa.TCGEN05_TRANSPOSED_LAYOUT
 ROW_LAYOUT = fa.TCGEN05_ROW_LAYOUT
 COL_LAYOUT = fa.TCGEN05_COL_LAYOUT
 
@@ -50,6 +51,12 @@ COL_LAYOUT = fa.TCGEN05_COL_LAYOUT
 TMEM_NATIVE_LAYOUT = fa.TiledLayout(
     fa.Tiling(((128, 2), (32, 2))),
     warp_dims=(-4,),
+    lane_dims=(-2,),
+    vector_dim=-1,
+)
+TMEM_NATIVE_ROW_LAYOUT = fa.TiledLayout(
+    fa.Tiling(((128,), (32,), (1,))),
+    warp_dims=(-3,),
     lane_dims=(-2,),
     vector_dim=-1,
 )
@@ -330,9 +337,9 @@ def mma(
       raise ValueError(
           f"A scale shape mismatch: expected (128, 4), got {a_scale.shape}"
       )
-    if a_scale.dtype != i32:
+    if a_scale.dtype != ir.Float8E8M0FNUType.get():
       raise ValueError(
-          f"A scale dtype mismatch: expected int32, got {a_scale.dtype}"
+          f"A scale dtype mismatch: expected f8e8m0fnu, got {a_scale.dtype}"
       )
     if n % 32:
       raise ValueError(
@@ -342,9 +349,9 @@ def mma(
       raise ValueError(
           f"B scale shape mismatch: expected (128, {n // 32}), got {b_scale.shape}"
       )
-    if b_scale.dtype != i32:
+    if b_scale.dtype != ir.Float8E8M0FNUType.get():
       raise ValueError(
-          f"B scale dtype mismatch: expected int32, got {b_scale.dtype}"
+          f"B scale dtype mismatch: expected f8e8m0fnu, got {b_scale.dtype}"
       )
 
   # Step 3. Compute the operand descriptors.
@@ -531,7 +538,7 @@ def commit_arrive(
   else:
     ptx = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [$0];"
   return llvm.inline_asm(
-      ir.Type.parse("!llvm.void"), [barrier], ptx, "l", has_side_effects=True
+      ir.Type.parse("!llvm.void"), [barrier], ptx, "r", has_side_effects=True
   )
 
 
@@ -764,6 +771,19 @@ def fa_m64_collective_layout(columns):
       warp_dims=(-6, -7),
       lane_dims=(-3, -2),
       vector_dim=-1,
+  )
+
+
+def scales_layout():
+  """A TMEM layout for A and B scales in .scale_vec::1X configuration.
+
+  See https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-a-layout-1x
+  """
+  return TMEMLayout(
+      fa.Tiling(((TMEM_ROWS, 4), (TMEM_ROWS // 4, 1))),
+      warp_dims=(fa.Replicated(times=4),),
+      lane_dims=(-2,),
+      vector_dim=-3,
   )
 
 
@@ -1175,3 +1195,55 @@ def commit_tmem():
       void, [], "tcgen05.wait::st.sync.aligned;", "", has_side_effects=True,
   )
   utils.warpgroup_barrier()
+
+
+def wait_load_tmem():
+  void = ir.Type.parse("!llvm.void")
+  llvm.inline_asm(
+      void, [], "tcgen05.wait::ld.sync.aligned;", "", has_side_effects=True,
+  )
+  utils.warpgroup_barrier()
+
+
+
+def async_copy_scales_smem_to_tmem(smem_ref: ir.Value, tmem_ref: TMEMRef):
+  """Asynchronously copies the scale data from SMEM to TMEM.
+
+  The result of the copy can be awaited by calling ``commit_arrive`` and waiting
+  on the chosen ``Barrier``. However, if TMEM reference is to be consumed by a
+  MMA issued in the same thread, no additional synchronization is needed.
+
+  At the moment the function requires ``smem_ref`` to be contiguous and have a
+  shape of (32, 4, 4) for 8-bit scales, matching the scale layout for
+  .scale_vec::1X. See https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-a-layout-1x
+  for more details.
+
+  The TMEM ref is expected to have the logical shape of the scales (128, 4), and
+  the layout created by ``scales_layout()``.
+  """
+  smem_ty = ir.MemRefType(smem_ref.type)
+  if (dtype := smem_ty.element_type) != tmem_ref.dtype:
+    raise ValueError(f"Incompatible dtypes: SMEM has {dtype}, TMEM has {tmem_ref.dtype}")
+  expected_tmem_shape = (TMEM_ROWS, 32 // utils.bitwidth(dtype))
+  if tmem_ref.shape != expected_tmem_shape:
+    raise ValueError(f"TMEM has shape {tmem_ref.shape}, but only {expected_tmem_shape} is supported")
+  if tmem_ref.layout != scales_layout():
+    raise ValueError(f"TMEM layout {tmem_ref.layout} is not supported")
+  smem_shape = tuple(smem_ty.shape)
+  expected_smem_shape = (TMEM_ROWS // 4, 4, 32 // utils.bitwidth(dtype))
+  if smem_shape != expected_smem_shape:
+    raise NotImplementedError(
+        f"SMEM has {smem_shape}, but only {expected_smem_shape} is supported"
+    )
+  strides, _ = smem_ty.get_strides_and_offset()
+  if strides != utils.get_contiguous_strides(smem_shape):
+    raise ValueError("Only copies from contiguous SMEM references are supported")
+  # The "core matrix" here is the same as in MMA: 8x(16 bytes).
+  desc = mma_utils.encode_descriptor(smem_ref, 0, 8 * 16, swizzle=None)
+  llvm.inline_asm(
+      ir.Type.parse("!llvm.void"),
+      [tmem_ref.address, desc],
+      "tcgen05.cp.cta_group::1.32x128b.warpx4 [$0], $1;",
+      "r,l",
+      has_side_effects=True,
+  )

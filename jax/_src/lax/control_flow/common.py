@@ -23,18 +23,14 @@ from typing import Any
 from jax._src import ad_util
 from jax._src import api_util
 from jax._src import core
-from jax._src import effects
 from jax._src import linear_util as lu
 from jax._src import state
-from jax._src.lax import lax
 from jax._src.util import weakref_lru_cache, safe_map, partition_list
 from jax._src.interpreters import partial_eval as pe
 from jax._src.tree_util import (equality_errors_pytreedef, tree_map,
                                 tree_unflatten, keystr, PyTreeDef)
 
 map, unsafe_map = safe_map, map
-
-effects.control_flow_allowed_effects.add_type(lax.InOutFeedEffect)
 
 
 def _typecheck_param(prim, param, name, msg_required, pred):
@@ -56,28 +52,18 @@ def _initial_style_open_jaxpr(fun: Callable,
   wrapped_fun, out_tree = api_util.flatten_fun_nokwargs(
       lu.wrap_init(fun, debug_info=debug_info),
       in_tree)
-  jaxpr, _, consts, attrs_tracked = pe.trace_to_jaxpr_dynamic(
-      wrapped_fun, in_avals)
-  return jaxpr, consts, out_tree(), attrs_tracked
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals)
+  return jaxpr, consts, out_tree()
 
 @weakref_lru_cache
 def _initial_style_jaxpr(fun: Callable,
                          in_tree: PyTreeDef,
                          in_avals: Sequence[core.AbstractValue],
-                         debug_info: core.DebugInfo):
-  jaxpr, consts, out_tree, () = _initial_style_open_jaxpr(
+                         debug_info: core.DebugInfo) -> tuple[core.ClosedJaxpr, Sequence[Any], PyTreeDef]:
+  jaxpr, consts, out_tree = _initial_style_open_jaxpr(
       fun, in_tree, in_avals, debug_info)
   closed_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jaxpr))
   return closed_jaxpr, consts, out_tree
-
-def _initial_style_jaxpr_attrs(fun: Callable,
-                               in_tree: PyTreeDef,
-                               in_avals: Sequence[core.AbstractValue],
-                               debug_info: core.DebugInfo):
-  jaxpr, consts, out_tree, attrs_tracked = _initial_style_open_jaxpr(
-      fun, in_tree, in_avals, debug_info)
-  closed_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jaxpr))
-  return closed_jaxpr, consts, out_tree, attrs_tracked
 
 def _initial_style_jaxprs_with_common_consts(
     funs: Sequence[Callable],
@@ -94,7 +80,7 @@ def _initial_style_jaxprs_with_common_consts(
   if not jaxpr_data:
     return [], [], []
 
-  jaxprs, all_consts, all_out_trees, all_attrs_tracked = zip(*jaxpr_data)
+  jaxprs, all_consts, all_out_trees = zip(*jaxpr_data)
   all_const_avals = [map(core.get_aval, consts) for consts in all_consts]
 
   # TODO(sharadmv,mattjj): we could dedup *all consts* instead of just the Refs.
@@ -243,13 +229,8 @@ def _prune_zeros(ts):
 
 def _make_closed_jaxpr(traceable: lu.WrappedFun,
                        in_avals: Sequence[core.AbstractValue]):
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(traceable, in_avals)
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(traceable, in_avals)
   return core.ClosedJaxpr(jaxpr, consts)
-
-def _make_closed_jaxpr_attrs(traceable: lu.WrappedFun, in_avals: Sequence[core.AbstractValue]):
-  jaxpr, _, consts, attrs_tracked = pe.trace_to_jaxpr_dynamic(traceable, in_avals)
-  return core.ClosedJaxpr(jaxpr, consts), attrs_tracked
-
 
 def _show_diff(array1, array2):
   if core.typematch(array1, array2):

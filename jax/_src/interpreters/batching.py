@@ -458,7 +458,28 @@ class AxisData:
   size : Any
   # Only one of spmd_axis_name and explicit_mesh_axis is set.
   spmd_name : Any
-  explicit_mesh_axis: Any
+  _explicit_mesh_axis: Any
+
+  @property
+  def explicit_mesh_axis(self):
+    if self._explicit_mesh_axis is None:
+      return None
+    cur_mesh = mesh_lib.get_abstract_mesh()
+    if cur_mesh.empty:
+      return self._explicit_mesh_axis
+    spec = (self._explicit_mesh_axis[0]
+            if isinstance(self._explicit_mesh_axis, tuple) else
+            self._explicit_mesh_axis)
+    if cur_mesh._name_to_type[spec] != mesh_lib.AxisType.Explicit:
+      return None
+    return self._explicit_mesh_axis
+
+  def __repr__(self):
+    return (f'AxisData(name={self.name}, size={self.size},'
+            f' spmd_name={self.spmd_name},'
+            f' explicit_mesh_axis={self.explicit_mesh_axis})')
+
+  __str__ = __repr__
 
 
 def get_sharding_for_vmap(axis_data, orig_sharding, axis):
@@ -793,7 +814,7 @@ def _batch_jaxpr2(
         if config._check_vma.value:
           aval = aval.update(vma=aval.vma | frozenset(axis_data.spmd_name))  # type: ignore
       avals_in2.append(aval)
-  jaxpr_out, _, consts, () = pe.trace_to_jaxpr_dynamic(f, avals_in2)
+  jaxpr_out, _, consts = pe.trace_to_jaxpr_dynamic(f, avals_in2)
   return core.ClosedJaxpr(jaxpr_out, consts), out_axes()
 
 def handle_ragged(in_avals: list[core.AbstractValue], dim: RaggedAxis,
@@ -834,7 +855,7 @@ def _batch_jaxpr_axes(closed_jaxpr: core.ClosedJaxpr,
                                  axis_data.explicit_mesh_axis)
               if b is not not_mapped
               else aval for aval, b in unsafe_zip(closed_jaxpr.in_avals, in_axes)]
-  jaxpr_out, _, consts, () = pe.trace_to_jaxpr_dynamic(f, avals_in)
+  jaxpr_out, _, consts = pe.trace_to_jaxpr_dynamic(f, avals_in)
   return core.ClosedJaxpr(jaxpr_out, consts), out_batched()
 
 @lu.transformation_with_aux2

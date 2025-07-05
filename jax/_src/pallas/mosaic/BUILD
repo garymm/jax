@@ -102,8 +102,10 @@ py_library(
         ":primitives",
         "//jax",
         "//jax:ad_util",
+        "//jax:checkify",
         "//jax:core",
         "//jax:custom_derivatives",
+        "//jax:debugging",
         "//jax:dtypes",
         "//jax:mesh",
         "//jax:mlir",
@@ -138,6 +140,7 @@ py_library(
     deps = [
         ":primitives",
         "//jax",
+        "//jax:blocked_sampler",
         "//jax:typing",
     ] + py_deps("numpy"),
 )

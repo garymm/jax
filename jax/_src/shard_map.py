@@ -142,9 +142,13 @@ Infer = InferFromArgs()
 def _get_default_infer():
   return Infer
 
-# TODO(yashkatariya): We need a singleton which users can provide to `in_axes`
-# to tell smap to infer in_specs from args when mesh is fully explicit.
-def smap(f, /, *, in_axes=Infer, out_axes, axis_name: AxisName):
+def smap(f=None, /, *, in_axes=Infer, out_axes, axis_name: AxisName):
+  kwargs = dict(in_axes=in_axes, out_axes=out_axes, axis_name=axis_name)
+  if f is None:
+    return lambda g: _smap(g, **kwargs)
+  return _smap(f, **kwargs)
+
+def _smap(f, *, in_axes, out_axes, axis_name: AxisName):
   if isinstance(axis_name, (list, tuple)):
     raise TypeError(
         f"smap axis_name should be a `str` or a `Hashable`, but got {axis_name}")
@@ -388,7 +392,10 @@ def _check_specs(error_type: SpecErrorType, specs: Any, manual_axes) -> None:
       + '\n\n'.join(msgs) + '\n\n'
       f"Check the {prefix}_specs values passed to shard_map.")
 
-class NoFail: pass
+class NoFail:
+  def __repr__(self):
+    return "NoFail()"
+
 no_fail = NoFail()
 
 def _check_specs_vs_args(
@@ -652,7 +659,7 @@ def _shard_map_staging(
                   in_avals)
   with (_extend_axis_env(mesh, manual_axes), use_abstract_mesh(inner_mesh),
         config._check_vma(check_vma)):
-    jaxpr, out_avals_, consts, () = pe.trace_to_jaxpr_dynamic(f, in_avals_)
+    jaxpr, out_avals_, consts = pe.trace_to_jaxpr_dynamic(f, in_avals_)
   _check_names(out_specs_thunk(), out_avals_)
   if check_vma:
     out_vma = [v.aval.vma for v in jaxpr.outvars]
@@ -660,10 +667,6 @@ def _shard_map_staging(
   out_avals = map(_check_shapedarray, out_avals_)
   out_avals = [_check_shapedarray(_unshard_aval(mesh, check_vma, spec, aval))
                for spec, aval in zip(out_specs_thunk(), out_avals)]
-  out_tracers = [pe.DynamicJaxprTracer(trace, a, source_info) for a in out_avals]
-  invars = map(trace.getvar, in_tracers)
-  constvars = map(trace.getvar, map(to_jaxpr_tracer, consts))
-  outvars = map(trace.makevar, out_tracers)
   in_specs_staged = (P(),) * len(consts) + tuple(in_specs)  # type: ignore
   with (_extend_axis_env(mesh, manual_axes), use_abstract_mesh(inner_mesh),
         config._check_vma(check_vma)):
@@ -672,10 +675,9 @@ def _shard_map_staging(
                 out_specs=tuple(out_specs_thunk()), jaxpr=jaxpr,
                 check_vma=check_vma, manual_axes=manual_axes)
   effs = core.filter_named_axis_effects(jaxpr.effects, mesh.axis_names)
-  eqn = pe.new_jaxpr_eqn([*constvars, *invars], outvars, prim, params,
+  const_tracers = map(to_jaxpr_tracer, consts)
+  return trace.emit_eqn([*const_tracers, *in_tracers], out_avals, prim, params,
                          effs, source_info)
-  trace.frame.add_eqn(eqn)
-  return out_tracers
 pe.DynamicJaxprTrace.process_shard_map = _shard_map_staging
 
 # TODO add underscore version, for direct-linearize to consume
@@ -903,7 +905,7 @@ def _shard_map_lowering(ctx, *in_nodes, jaxpr, mesh, in_specs, out_specs,
   sub_ctx = ctx.module_context.replace(axis_context=new_axis_context)
   with _extend_axis_env(mesh, manual_axes), config._check_vma(check_vma):
     out_nodes_, tokens_out = mlir.call_lowering(
-        "shmap_body", ctx.name_stack, jaxpr, None, sub_ctx, in_avals_,
+        "shmap_body", jaxpr, None, sub_ctx, in_avals_,
         out_avals_, ctx.tokens_in, *in_nodes_,
         dim_var_values=ctx.dim_var_values,
         arg_names=map(_pspec_mhlo_attrs, in_specs, in_avals_),
@@ -1397,7 +1399,7 @@ def _shard_map_partial_eval(trace: pe.JaxprTrace, shard_map_p,
   unk_arg_tracers = [t for t in tracers if not t.is_known()]
   out_avals_sharded = [v.aval for v in jaxpr.outvars]
   unk_params = dict(mesh=mesh, in_specs=unk_in_specs,
-                    out_specs=unk_out_specs, jaxpr=jaxpr,
+                    out_specs=tuple(unk_out_specs), jaxpr=jaxpr,
                     check_vma=check_vma, manual_axes=manual_axes)
   out_avals = map(partial(_unshard_aval, mesh, check_vma), unk_out_specs,
                   out_avals_sharded)
@@ -1519,7 +1521,7 @@ def _promote_scalar_residuals_jaxpr(jaxpr: core.Jaxpr, which: Sequence[bool]):
   res_avals = [core.unmapped_aval(1, 0, v.aval) if w else v.aval
                for v, w in zip(jaxpr.constvars, which)]
   in_avals = [*res_avals, *[v.aval for v in jaxpr.invars]]
-  jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+  jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(fun, debug_info=jaxpr.debug_info), in_avals)
   return jaxpr
 
@@ -1567,6 +1569,7 @@ def _shard_map_transpose(out_cts, *args,
     res_zeros = [ad_util.zero_from_primal(r) for r in res]
     return merge_lists(in_undef, res_zeros, in_cts)
 
+  fun_trans_callable.__name__ = f"transpose({jaxpr.debug_info.func_name})"
   fun_trans = lu.wrap_init(fun_trans_callable, debug_info=jaxpr.debug_info)
   fun_trans, nz_arg_cts = ad.nonzero_outputs(fun_trans)
   fun_trans_flat, out_tree = api_util.flatten_fun_nokwargs(fun_trans, in_tree)
@@ -1598,6 +1601,12 @@ def _shard_map_transpose(out_cts, *args,
       raise e2 from None
     else:
       api_util._raise_no_nan_in_deoptimized(e)
+  except _RepError as e:
+    fails, = e.args
+    if not callable(out_specs):
+      msg = _inout_vma_error(
+          fun_trans, mesh, out_tree(), list(new_out_specs_thunk()), fails)
+      raise ValueError(msg) from None
   return tree_unflatten(out_tree(), out_flat)
 ad.primitive_transposes[shard_map_p] = _shard_map_transpose
 
@@ -1680,7 +1689,7 @@ def _add_reshapes(which: Sequence[bool],
     res = [_add_singleton(x) if not x.shape else x for x in res]
     return [*out_known, *res]
   avals_in = [v.aval for v in jaxpr_known.invars]
-  jaxpr_known, _, (), () = pe.trace_to_jaxpr_dynamic(
+  jaxpr_known, _, () = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(known, debug_info=jaxpr_known.debug_info), avals_in)
 
   def staged(*args):
@@ -1690,7 +1699,7 @@ def _add_reshapes(which: Sequence[bool],
   res_avals = [core.unmapped_aval(1, 0, v.aval) if w else v.aval
                for w, v in zip(which_, jaxpr_staged.invars[:len(which)])]
   avals_in = [*res_avals, *[v.aval for v in jaxpr_staged.invars[len(which):]]]
-  jaxpr_staged, _, (), () = pe.trace_to_jaxpr_dynamic(
+  jaxpr_staged, _, () = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(staged, debug_info=jaxpr_staged.debug_info), avals_in)
 
   return jaxpr_known, jaxpr_staged

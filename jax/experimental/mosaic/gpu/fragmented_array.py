@@ -175,6 +175,7 @@ class Tiling:
     for t in self.tiles:
       assert last_tile_rank >= len(t)
       dim_in_tile -= last_tile_rank - len(t)
+      last_tile_rank = len(t)
       if dim_in_tile >= 0:
         t = t[:dim_in_tile] + t[dim_in_tile + 1:]
       if not t:  # If this tile is empty, all other tiles will be empty too.
@@ -391,7 +392,7 @@ class TiledLayout:
       yield tuple(idx)
 
   @property
-  def base_tile_shape(self) -> int:
+  def base_tile_shape(self) -> tuple[int, ...]:
     """The shape of the first tile in the tiling expression.
 
     This tile acts as the divisibility constraint for a suffix of arrays to
@@ -798,6 +799,13 @@ TCGEN05_LAYOUT = TiledLayout(
     lane_dims=(-3, -2),
     vector_dim=-1,
 )
+# Like WGMMA_TRANSPOSED_LAYOUT, only each warp holds a 32xN strip instead of 16xN.
+TCGEN05_TRANSPOSED_LAYOUT = TiledLayout(
+    Tiling(((128, 8), (32, 8), (8, 8), (2, 2), (2, 1))),
+    warp_dims=(-10,),
+    lane_dims=(-6, -3, -5),
+    vector_dim=-2,
+)
 # TCGEN05_ROW_LAYOUT is to TCGEN05_LAYOUT as WGMMA_ROW_LAYOUT is to
 # WGMMA_LAYOUT.
 TCGEN05_ROW_LAYOUT = TiledLayout(
@@ -953,10 +961,9 @@ class FragmentedArray:
     if self.layout == new_layout:
       return self
     shape = self.shape
-    if (
-        self.layout == WGMMA_LAYOUT
-        and new_layout == WGMMA_TRANSPOSED_LAYOUT
-        and utils.bitwidth(self.mlir_dtype) == 16
+    if utils.bitwidth(self.mlir_dtype) == 16 and (
+        (self.layout == WGMMA_LAYOUT and new_layout == WGMMA_TRANSPOSED_LAYOUT)
+        or (self.layout == TCGEN05_LAYOUT and new_layout == TCGEN05_TRANSPOSED_LAYOUT)
     ):
       is_even_row = arith.cmpi(
           arith.CmpIPredicate.eq,
@@ -1516,9 +1523,9 @@ class FragmentedArray:
       raise NotImplementedError("Only arrays with tiled layouts can be sliced")
     base_idx, slice_shape, is_squeezed = utils.parse_indices(idx, self.shape)
     if any(isinstance(idx, ir.Value) for idx in base_idx):
-      raise ValueError("Only static slicing allowed")
+      raise ValueError("Only slicing with static indices allowed")
     if any(is_squeezed):
-      raise NotImplementedError("Only slicing implemented")
+      raise NotImplementedError("Integer indexing not implemented (only slicing allowed)")
     base_tile_shape = self.layout.base_tile_shape
     if len(base_tile_shape) != len(self.shape):
       raise NotImplementedError("Tiling has different rank than array")
@@ -1534,6 +1541,53 @@ class FragmentedArray:
     new_regs = self.registers[register_slices]
     return FragmentedArray(
         _registers=new_regs, _layout=self.layout, _is_signed=self.is_signed
+    )
+
+  def __setitem__(self, idx, value):
+    if not isinstance(value, FragmentedArray):
+      raise ValueError(f"Expected a FragmentedArray, got: {value}")
+    if not isinstance(self.layout, TiledLayout):
+      raise NotImplementedError("Only arrays with tiled layouts can be sliced")
+    base_idx, slice_shape, is_squeezed = utils.parse_indices(idx, self.shape)
+    if any(isinstance(idx, ir.Value) for idx in base_idx):
+      raise ValueError("Only slicing with static indices allowed")
+    if any(is_squeezed):
+      raise NotImplementedError("Integer indexing not implemented (only slicing allowed)")
+    if value.shape != tuple(slice_shape):
+      raise ValueError(
+          f"Slice has shape {tuple(slice_shape)}, but assigned array has shape"
+          f" {value.shape}"
+      )
+    if value.mlir_dtype != self.mlir_dtype:
+      raise ValueError(
+          f"Array has dtype {value.mlir_dtype}, but assigned array has dtype"
+          f" {self.mlir_dtype}"
+      )
+    if value.layout != self.layout:
+      raise ValueError(
+          f"Array has layout {value.layout}, but assigned array has layout"
+          f" {self.layout}"
+      )
+    base_tile_shape = self.layout.base_tile_shape
+    if len(base_tile_shape) != len(self.shape):
+      raise NotImplementedError("Tiling has different rank than array")
+    if any(
+        b % t or l % t
+        for b, l, t in zip(base_idx, slice_shape, base_tile_shape, strict=True)
+    ):
+      raise NotImplementedError("Only tile aligned slicing supported")
+    register_slices = tuple(
+        slice(b // t, (b + l) // t)
+        for b, l, t in zip(base_idx, slice_shape, base_tile_shape, strict=True)
+    )
+    assert self.registers[register_slices].shape == value.registers.shape
+    self.registers[register_slices] = value.registers
+
+  def copy(self):
+    return FragmentedArray(
+        _registers=np.copy(self.registers),
+        _layout=self.layout,
+        _is_signed=self.is_signed,
     )
 
   # TODO(apaszke): Support JAX dtypes here as well?
@@ -2088,47 +2142,66 @@ class FragmentedArray:
     )
 
   def broadcast_minor(self, n):
-    if self.layout == WGMMA_ROW_LAYOUT:
-      output_layout = WGMMA_LAYOUT
-    elif self.layout == TCGEN05_ROW_LAYOUT:
-      output_layout = TCGEN05_LAYOUT
-    else:
-      raise NotImplementedError(self.layout)
+    if len(self.shape) != 1:
+      raise ValueError("Broadcast minor is only supported for 1D arrays")
     if n % 8:
-      raise ValueError("Number of columns must be divisible by 8")
-    reg_shape = output_layout.registers_shape((self.shape[0], n))
-    new_regs = np.empty(reg_shape, dtype=object)
-    dtype = self.mlir_dtype
-    i0 = arith.constant(ir.IndexType.get(), 0)
-    for (row_tile, _, row_subtile, *__), reg in np.ndenumerate(self.registers):
-      tile = [slice(None)] * len(new_regs.shape)
-      tile[0] = row_tile
-      tile[4] = row_subtile
-      new_regs[tuple(tile)] = vector.splat(
-          ir.VectorType.get((output_layout.vector_length,), dtype),
-          vector.extractelement(reg, position=i0),
-      )
-    return FragmentedArray(
-        _registers=new_regs, _layout=output_layout, _is_signed=self.is_signed
-    )
-
-  def broadcast_major(self, m):
-    if self.layout == WGMMA_COL_LAYOUT:
-      output_layout = WGMMA_LAYOUT
-    elif self.layout == TCGEN05_COL_LAYOUT:
-      output_layout = TCGEN05_LAYOUT
+      raise ValueError(f"The broadcast dimension must be a multiple of 8, got {n}")
+    if self.layout == WGMMA_ROW_LAYOUT:
+      new_layout = WGMMA_LAYOUT
+    elif self.layout == TCGEN05_ROW_LAYOUT:
+      new_layout = TCGEN05_LAYOUT
     else:
       raise NotImplementedError(self.layout)
-    if m % 64:
-      raise ValueError("Number of rows must be divisible by 64")
-    reg_shape = output_layout.registers_shape((m, self.shape[0]))
-    new_regs = np.empty(reg_shape, dtype=object)
-    for (col_tile, *_), reg in np.ndenumerate(self.registers):
-      tile = [slice(None)] * len(new_regs.shape)
-      tile[1] = col_tile
-      new_regs[tuple(tile)] = reg
+    return self.broadcast_in_dim((self.shape[0], n), (0,), new_layout)
+
+  def broadcast_in_dim(self, shape, source_dimensions, layout: FragmentedLayout):
+    for i, target_dim in enumerate(source_dimensions):
+      if self.shape[i] != shape[target_dim]:
+        raise ValueError(
+            f"Dimension {i} has size {self.shape[i]} in source shape and"
+            f" {shape[target_dim]} in shape after broadcast"
+        )
+    if isinstance(self.layout, WGSplatFragLayout):
+      if isinstance(layout, WGSplatFragLayout):
+        if layout.shape != shape:
+          raise ValueError(
+              f"Layout shape {layout.shape} does not match broadcast shape {shape}"
+          )
+        return FragmentedArray(
+            _registers=self.registers, _layout=layout, _is_signed=self.is_signed,
+        )
+      # TODO: Support splat to other layouts
+    if not isinstance(self.layout, TiledLayout) or not isinstance(layout, TiledLayout):
+      raise NotImplementedError(self.layout, layout)
+    if any(d1 >= d2 for d1, d2 in zip(source_dimensions, source_dimensions[1:])):
+      raise NotImplementedError("source_dimensions must be strictly increasing")
+    new_dimensions = set(range(len(shape))) - set(source_dimensions)
+    expected_layout = layout.reduce(new_dimensions)
+    if expected_layout != self.layout:
+      raise ValueError(
+          "Source and destination layouts aren't compatible for a broadcast"
+      )
+    new_registers_shape = layout.registers_shape(shape)
+    pre_broadcast_registers_shape = list(new_registers_shape)
+    for new_dim in new_dimensions:
+      for i, is_new in enumerate(layout.tiling.tile_dimension(new_dim)):
+        if is_new:
+          pre_broadcast_registers_shape[i] = 1
+    # The broadcast for all dims but the vector_dim amounts to repeating the
+    # registers along the new dimensions. Along the vector_dim, we actually need
+    # to extend the vector length to change the type of the registers.
+    if layout.vector_length != self.layout.vector_length:
+      assert self.layout.vector_length == 1
+      registers = np.empty_like(self.registers)
+      for idx, reg in np.ndenumerate(self.registers):
+        registers[idx] = utils.vector_concat([reg] * layout.vector_length)
+    else:
+      registers = self.registers
+    new_registers = np.broadcast_to(
+        registers.reshape(pre_broadcast_registers_shape), new_registers_shape,
+    )
     return FragmentedArray(
-        _registers=new_regs, _layout=output_layout, _is_signed=self.is_signed
+        _registers=new_registers, _layout=layout, _is_signed=self.is_signed,
     )
 
   def select(self, on_true, on_false):
@@ -2316,6 +2389,8 @@ class FragmentedArray:
         tiled_shape = ref_ty.shape
         if len(tiled_shape) % 2:
           raise ValueError("Tiled reference must have even rank")
+        if len(tiled_shape) < 2:
+          raise ValueError("Tiled reference must have at least two dimensions")
         tiling = Tiling((tiled_shape[len(tiled_shape) // 2 :],))
         shape = tiling.untile_shape(tiled_shape)
         zero = (
@@ -2459,8 +2534,11 @@ class FragmentedArray:
     ref_tiling_shape = tuple(ref_ty.shape[ref_logical_rank:])
     ref_tiling = Tiling((ref_tiling_shape,))
     ref_strides, _ = ref_ty.get_strides_and_offset()
-    if ref_tiling.untile_shape(tuple(ref_ty.shape)) != shape:
-      raise ValueError()
+    if (ref_logical_shape := ref_tiling.untile_shape(tuple(ref_ty.shape))) != shape:
+      raise ValueError(
+          f"The reference has untiled shape of {ref_logical_shape} while the"
+          f" register array has shape {shape}"
+      )
     nested_ref_shape = tuple(
         (ref_ty.shape[i], ref_ty.shape[i + ref_logical_rank])
         if ref_ty.shape[i + ref_logical_rank] != 1 else (ref_ty.shape[i],)
@@ -2474,48 +2552,53 @@ class FragmentedArray:
     tiled_nested_shape, tiled_nested_strides = tiling.tile_nested_shape_strides(
         nested_ref_shape, nested_ref_strides
     )
-
-    # We could technically handle this case, but it would be quite complicated.
-    # If tiling dimensions would have to be expanded into multiple, we'd have to
-    # adjust the dimension indices in layouts, including expanding some of them
-    # into multiple indices. Note that for non-tiling dims, we allow the shape
-    # to be arbitrary, which is why we fix it up below in mem_idx_to_reg_idx.
-    if any(
-        len(dim_shape) != 1 for dim_shape in tiled_nested_shape[-layout.tiled_tiling_rank :]
-    ):
-      raise NotImplementedError("Memory and register tiling too complicated")
-    tiled_shape = list(itertools.chain.from_iterable(tiled_nested_shape))
-    elem_tiled_strides = list(itertools.chain.from_iterable(tiled_nested_strides))
-    lane_shape = [
-        d.times if isinstance(d, Replicated) else tiled_shape[d] for d in layout.lane_dims
-    ]
-    lane_strides = [
-        0 if isinstance(d, Replicated) else elem_tiled_strides[d] for d in layout.lane_dims
-    ]
-    if elem_tiled_strides[layout.vector_dim] != 1:
-      raise ValueError("Stride of the vectorized dimension should be 1")
-    for d in (*layout.partitioned_warp_dims, *layout.partitioned_lane_dims, layout.vector_dim):
-      tiled_shape[d] = 1
-
-    element_bits = mgpu.bitwidth(dtype)
-    if (layout.vector_length * element_bits) % 8 != 0:
-      raise ValueError(
-          f"Vector length ({layout.vector_length}) must be a multiple of bytes,"
-          f" but has {layout.vector_length * element_bits} bits"
-      )
-    transfer_bytes = (layout.vector_length * element_bits) // 8
     # Not sure if this is strictly required for all data types, but it certainly
     # is for sub-byte types (else we might not increment the pointer by whole bytes).
     if any(
-        s % layout.vector_length and i != layout.vector_dim and d != 1
-        for i, (s, d) in enumerate_negative(
-            list(zip(elem_tiled_strides, tiled_shape))
-        )
+        any(s % layout.vector_length and d != 1 for s, d in zip(ss, ds))
+        for i, (ss, ds) in enumerate_negative(list(zip(tiled_nested_strides, tiled_nested_shape)))
+        if i != layout.vector_dim
     ):
       raise ValueError(
           "Tiled strides must be a multiple of the vector length, except for the"
           " vector dimension"
       )
+    if tiled_nested_strides[layout.vector_dim] != (1,):
+      raise ValueError(
+          "Vectorized dimension should not require further tiling and have a"
+          " stride of 1"
+      )
+
+    tiles_shape = list(tiled_nested_shape)
+    tiles_strides = list(tiled_nested_strides)
+    for d in (*layout.partitioned_warp_dims, *layout.partitioned_lane_dims, layout.vector_dim):
+      # We could avoid repeating the singleton dimensions, but it simplifies the
+      # code below that computes the register index for a given tile.
+      tiles_shape[d] = (1,) * len(tiles_shape[d])
+      tiles_strides[d] = (0,) * len(tiles_strides[d])
+    tiles_shape = list(itertools.chain.from_iterable(tiles_shape))
+    tiles_strides = list(itertools.chain.from_iterable(tiles_strides))
+    warp_shape = list(itertools.chain.from_iterable(
+        (d.times,) if isinstance(d, Replicated) else tiled_nested_shape[d] for d in layout.warp_dims
+    ))
+    warp_strides = list(itertools.chain.from_iterable(
+        (0,) if isinstance(d, Replicated) else tiled_nested_strides[d] for d in layout.warp_dims
+    ))
+    lane_shape = list(itertools.chain.from_iterable(
+        (d.times,) if isinstance(d, Replicated) else tiled_nested_shape[d] for d in layout.lane_dims
+    ))
+    lane_strides = list(itertools.chain.from_iterable(
+        (0,) if isinstance(d, Replicated) else tiled_nested_strides[d] for d in layout.lane_dims
+    ))
+    vector_length = layout.vector_length
+
+    element_bits = mgpu.bitwidth(dtype)
+    if (vector_length * element_bits) % 8 != 0:
+      raise ValueError(
+          f"Vector length ({vector_length}) must be a multiple of bytes,"
+          f" but has {vector_length * element_bits} bits"
+      )
+    transfer_bytes = (vector_length * element_bits) // 8
 
     if swizzle not in {16, 32, 64, 128}:
       raise ValueError("Only swizzled transfers supported")
@@ -2525,15 +2608,12 @@ class FragmentedArray:
     swizzle_group_transfers = 128 // transfer_bytes
     swizzle_groups_per_block = swizzle // 16
     swizzle_block_transfers = swizzle_groups_per_block * swizzle_group_transfers
-    # Technically we should keep the vector_dim set to 1, but its shape is 1
-    # so it does not matter.
-    transfer_tiled_strides = [s // layout.vector_length for s in elem_tiled_strides]
     is_f8 = ir.FloatType.isinstance(dtype) and element_bits == 8
     i8 = ir.IntegerType.get_signless(8)
     if is_f8:
-      transfer_dtype = ir.VectorType.get((layout.vector_length,), i8)
+      transfer_dtype = ir.VectorType.get((vector_length,), i8)
     else:
-      transfer_dtype = ir.VectorType.get((layout.vector_length,), dtype)
+      transfer_dtype = ir.VectorType.get((vector_length,), dtype)
 
     if ref_ty.memory_space is None:
       llvm_memory_space = None
@@ -2546,26 +2626,51 @@ class FragmentedArray:
       if llvm_memory_space != 3:
         raise NotImplementedError("Only optimized transfers to SMEM supported")
       plan = plan_tiled_transfer(
-          tiled_shape, elem_tiled_strides, lane_shape, lane_strides,
-          layout, element_bits, swizzle
+          tiles_shape, tiles_strides,
+          warp_shape, warp_strides,
+          lane_shape, lane_strides,
+          vector_length, element_bits, swizzle
       )
     else:
       plan = TrivialTransferPlan()
 
-    # All offsets are in units of transfer_dtype.
+    tiles_strides_transfer = [s // vector_length for s in tiles_strides]
+    # Technically we should keep the vector_dim stride set to 1, but its shape
+    # is 1 so it does not matter.
     dyn_tiled_strides = [
-        c(s) for s in transfer_tiled_strides[-layout.tiled_tiling_rank :]
+        c(s // vector_length)
+        for s in itertools.chain.from_iterable(
+            tiled_nested_strides[-layout.tiled_tiling_rank :]
+        )
     ]
-    lane_offset = utils.dyn_dot(layout.lane_indices(), dyn_tiled_strides)
-    warp_offset = utils.dyn_dot(layout.warp_indices(), dyn_tiled_strides)
+    # This expands a tiled index into a finer-grained index that accounts for
+    # the fact that some tiled dims are tiled further in the nested shape.
+    def expand_nested_dims(idxs: Sequence[ir.Value]) -> list[ir.Value]:
+      assert len(idxs) == layout.tiled_tiling_rank
+      new_idxs = []
+      for idx, dim_shape in zip(idxs, tiled_nested_shape[-layout.tiled_tiling_rank :]):
+        if dim_shape == (1,):
+          new_idxs.append(idx)
+          continue
+        dim_strides = utils.get_contiguous_strides(dim_shape)
+        for i, (size, stride) in enumerate(zip(dim_shape, dim_strides)):
+          new_idx = arith.divui(idx, c(stride))
+          if i != 0:  # No need to apply rem to the first dim.
+            new_idx = arith.remui(new_idx, c(size))
+          new_idxs.append(new_idx)
+      assert len(new_idxs) == sum(map(len, tiled_nested_shape[-layout.tiled_tiling_rank :]))
+      return new_idxs
+    # All offsets are in units of transfer_dtype.
+    lane_offset = utils.dyn_dot(expand_nested_dims(layout.lane_indices()), dyn_tiled_strides)
+    warp_offset = utils.dyn_dot(expand_nested_dims(layout.warp_indices()), dyn_tiled_strides)
     dyn_offset = arith.addi(lane_offset, warp_offset)
     ptr = utils.memref_ptr(ref, memory_space=llvm_memory_space)
     _as_consts = lambda consts: [c(const) for const in consts.tolist()]
     # This has bits set only for the offset bits that influence swizzling.
     swizzle_mask = swizzle_block_transfers - swizzle_tile_transfers
-    for tile_idx in np.ndindex(*tiled_shape):
+    for tile_idx in np.ndindex(*tiles_shape):
       indices = np.asarray([f(tile_idx) for f in plan.tile_index_transforms])
-      const_offset = np.dot(indices, transfer_tiled_strides)
+      const_offset = np.dot(indices, tiles_strides_transfer)
       # We split the offset into a part that interacts with swizzling and a
       # part that doesn't. This lets us generate better code because constant
       # offsets can be fused into load and store instructions.
@@ -2591,14 +2696,12 @@ class FragmentedArray:
       def mem_idx_to_reg_idx(idx):
         reg_tiled_idx = []
         base_idx = 0
-        for dim_shape in tiled_nested_shape[:ref_logical_rank]:
+        for dim_shape in tiled_nested_shape:
           dim_strides = utils.get_contiguous_strides(dim_shape)
           dim_idxs = idx[base_idx:base_idx + len(dim_shape)]
           base_idx += len(dim_shape)
           reg_tiled_idx.append(sum(i * s for i, s in zip(dim_idxs, dim_strides)))
-        # We should have fixed up all but the tiling dims.
-        assert base_idx == len(idx) - layout.tiled_tiling_rank
-        return (*reg_tiled_idx, *idx[base_idx:])
+        return tuple(reg_tiled_idx)
       reg_idxs = [mem_idx_to_reg_idx(idx) for idx in indices.tolist()]
       def get_register(regs, reg_idxs=reg_idxs):
         def cast_if_f8(x):
@@ -2692,14 +2795,33 @@ class StaggeredTransferPlan(TransferPlan):
 
 
 def plan_tiled_transfer(
-    tiled_shape: Sequence[int],
-    tiled_strides: Sequence[int],
+    tiles_shape: Sequence[int],
+    tiles_strides: Sequence[int],
+    warp_shape: Sequence[int],
+    warp_strides: Sequence[int],
     lane_shape: Sequence[int],
     lane_strides: Sequence[int],
-    layout: TiledLayout,
+    vector_length: int,
     element_bits: int,
     swizzle: int,
 ) -> TransferPlan:
+  """Plans the tiled transfer in a way that avoids SMEM bank conflicts.
+
+  Note that while xyz_shape length should always match the length of
+  xyz_strides, we do not require the iteration spaces of tiles/warps/lanes to
+  have the same rank.
+
+  Arguments:
+    tiles_shape: The nd-iteration space over tiles.
+    tiles_strides: The memory strides (in elements) for each tile dimension.
+    warp_shape: The nd-iteration space over warps in warpgroup.
+    warp_strides: The memory strides (in elements) for each warp dimension.
+    lane_shape: The nd-iteration space over lanes in a warp.
+    lane_strides: The memory strides (in elements) for each lane dimension.
+    vector_length: The length of a single transfer.
+    element_bits: Element bitwidth.
+    swizzle: The swizzle pattern length.
+  """
   i32 = ir.IntegerType.get_signless(32)
   c = lambda x: arith.constant(i32, x)
   # TODO(apaszke): Rewrite this function in terms of transfer_bytes (that we get
@@ -2707,21 +2829,25 @@ def plan_tiled_transfer(
   swizzle_tile_elems = (16 * 8) // element_bits
   swizzle_group_elems = (128 * 8) // element_bits
   # Should be checked at the call site.
-  assert layout.vector_length * element_bits % 8 == 0
-  transfer_bytes = (layout.vector_length * element_bits) // 8
+  assert vector_length * element_bits % 8 == 0
+  transfer_bytes = (vector_length * element_bits) // 8
   # Below, all calculations are in elements, not in bytes, since it should
   # generalize better to sub-byte types.
   # Here, we verify two conditions:
   # 1. Each vector transfer only accesses addresses that fall within a single
   # swizzle tile (if not we'd need to split it and swizzle parts differently).
+  chain = itertools.chain
   transfer_alignment = math.gcd(*(
       s
-      for i, (s, d) in enumerate_negative(list(zip(tiled_strides, tiled_shape)))
-      if d > 1 or i in {*layout.warp_dims, *layout.lane_dims}
+      for (s, d) in zip(
+          chain(tiles_strides, warp_strides, lane_strides),
+          chain(tiles_shape, warp_shape, lane_shape),
+      )
+      if d > 1
   ))
   if (
       swizzle_tile_elems % transfer_alignment
-      and layout.vector_length <= transfer_alignment
+      and vector_length <= transfer_alignment
   ):
     raise ValueError(
         "Failed to prove that vector transfers don't cross swizzle tile"
@@ -2750,12 +2876,12 @@ def plan_tiled_transfer(
 
   lane_offsets_in_tile = np.dot(list(np.ndindex(*lane_shape)), lane_strides)
   def has_bank_conflicts(tile_idx_transform):
-    num_tiles = math.prod(tiled_shape)
-    tile_idxs = np.unravel_index(np.arange(num_tiles), tiled_shape)
+    num_tiles = math.prod(tiles_shape)
+    tile_idxs = np.unravel_index(np.arange(num_tiles), tiles_shape)
     tile_idxs = np.expand_dims(np.stack(tile_idxs, 1), 1)  # [#tiles, 1, #dims]
     lane_tile_idx = tile_idx_transform(tile_idxs)  # [#tiles, #lanes/1, #dims]
     assert lane_tile_idx.shape[1] in {1, WARP_SIZE}
-    lane_tile_offsets = np.dot(lane_tile_idx, tiled_strides)
+    lane_tile_offsets = np.dot(lane_tile_idx, tiles_strides)
     offsets = lane_tile_offsets + lane_offsets_in_tile  # [#tiles, #lanes]
     assert offsets.shape[-1] == WARP_SIZE
     swizzle_groups = (offsets // swizzle_group_elems) % (swizzle // 16)
@@ -2788,7 +2914,7 @@ def plan_tiled_transfer(
   # the lanes into more groups, but the selects will become more expensive if
   # we do that. It's a possibility we have if we need it.
   candidate_dims = (
-      i for i, (s, d) in enumerate(zip(tiled_strides, tiled_shape))
+      i for i, (s, d) in enumerate(zip(tiles_strides, tiles_shape))
       if d > 1 and s % (SMEM_BANKS * elems_per_bank)
   )
   for dim in candidate_dims:
@@ -2798,17 +2924,17 @@ def plan_tiled_transfer(
       lane_group = (lane_id // group_stride) % 2
       # We only consider a transformation where the second group stores to a
       # tile that's a constant offset (modulo dim size) from the first one.
-      for stagger in range(1, tiled_shape[dim]):
-        offset = np.zeros(len(tiled_shape), np.int64)
+      for stagger in range(1, tiles_shape[dim]):
+        offset = np.zeros(len(tiles_shape), np.int64)
         offset[dim] = stagger
-        transform = lambda idx: (idx + offset * lane_group) % tiled_shape
+        transform = lambda idx: (idx + offset * lane_group) % tiles_shape
         if not has_bank_conflicts(transform):
           # We've found a strategy that avoids bank conflicts!
           lane_idx = arith.remui(utils.thread_idx(), c(WARP_SIZE))
           group_idx = arith.remui(arith.divui(lane_idx, c(group_stride)), c(2))
           group_pred = arith.cmpi(arith.CmpIPredicate.ne, group_idx, c(0))
           return StaggeredTransferPlan(
-              stagger, dim, tiled_shape[dim], group_pred
+              stagger, dim, tiles_shape[dim], group_pred
           )
   raise ValueError(
       "Failed to synthesize a transfer pattern that avoids bank conflicts"

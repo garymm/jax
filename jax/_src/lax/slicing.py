@@ -490,23 +490,59 @@ def scatter_add(
     scatter_indices: an array that gives the indices in `operand` to which each
       update in `updates` should be applied.
     updates: the updates that should be scattered onto `operand`.
-    dimension_numbers: a `lax.ScatterDimensionNumbers` object that describes
-      how dimensions of `operand`, `scatter_indices`, `updates` and the output
+    dimension_numbers: a `lax.ScatterDimensionNumbers` object that describes how
+      dimensions of `operand`, `scatter_indices`, `updates` and the output
       relate.
     indices_are_sorted: whether `scatter_indices` is known to be sorted. If
       true, may improve performance on some backends.
     unique_indices: whether the elements to be updated in ``operand`` are
-      guaranteed to not overlap with each other. If true, may improve performance on
-      some backends. JAX does not check this promise: if the updated elements
-      overlap when ``unique_indices`` is ``True`` the behavior is undefined.
+      guaranteed to not overlap with each other. If true, may improve
+      performance on some backends. JAX does not check this promise: if the
+      updated elements overlap when ``unique_indices`` is ``True`` the behavior
+      is undefined.
     mode: how to handle indices that are out of bounds: when set to 'clip',
-      indices are clamped so that the slice is within bounds, and when
-      set to 'fill' or 'drop' out-of-bounds updates are dropped. The behavior
-      for out-of-bounds indices when set to 'promise_in_bounds' is
+      indices are clamped so that the slice is within bounds, and when set to
+      'fill' or 'drop' out-of-bounds updates are dropped. The behavior for
+      out-of-bounds indices when set to 'promise_in_bounds' is
       implementation-defined.
 
   Returns:
     An array containing the sum of `operand` and the scattered updates.
+
+  Examples:
+    As mentioned above, you should basically never use :func:`scatter_add`
+    directly, and instead perform scatter-style operations using NumPy-style
+    indexing expressions via :attr:`jax.numpy.ndarray.at`.
+
+    Here is and example of updating entries in an array using
+    :attr:`jax.numpy.ndarray.at`, which lowers to an XLA Scatter operation:
+
+    >>> x = jnp.ones(5)
+    >>> indices = jnp.array([1, 2, 4])
+    >>> values = jnp.array([2.0, 3.0, 4.0])
+
+    >>> x.at[indices].add(values)
+    Array([1., 3., 4., 1., 5.], dtype=float32)
+
+    This syntax also supports several of the optional arguments to
+    :func:`scatter_add`, for example:
+
+    >>> x.at[indices].add(values, indices_are_sorted=True,
+    ...                   mode='promise_in_bounds')
+    Array([1., 3., 4., 1., 5.], dtype=float32)
+
+    By comparison, here is the equivalent function call using
+    :func:`scatter_add` directly, which is not something typical users should
+    ever need to do:
+
+    >>> lax.scatter_add(x, indices[:, None], values,
+    ...                 dimension_numbers=lax.ScatterDimensionNumbers(
+    ...                     update_window_dims=(),
+    ...                     inserted_window_dims=(0,),
+    ...                     scatter_dims_to_operand_dims=(0,)),
+    ...                 indices_are_sorted=True,
+    ...                 mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS)
+    Array([1., 3., 4., 1., 5.], dtype=float32)
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.add,
                                        core.get_aval(lax._const(operand, 0)))
@@ -561,7 +597,8 @@ def scatter_sub(
       implementation-defined.
 
   Returns:
-    An array containing the sum of `operand` and the scattered updates.
+    An array containing the difference between `operand` and the scattered
+    updates.
   """
   jaxpr, consts = lax._reduction_jaxpr(
       lax.sub, core.get_aval(lax._const(operand, 0))
@@ -618,7 +655,7 @@ def scatter_mul(
       implementation-defined.
 
   Returns:
-    An array containing the sum of `operand` and the scattered updates.
+    An array containing the product of `operand` and the scattered updates.
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.mul,
                                        core.get_aval(lax._const(operand, 1)))
@@ -667,7 +704,7 @@ def scatter_min(
       implementation-defined.
 
   Returns:
-    An array containing the sum of `operand` and the scattered updates.
+    An array containing the min of `operand` and the scattered updates.
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.min,
                                        core.get_aval(lax._const(operand, 0)))
@@ -716,7 +753,7 @@ def scatter_max(
       implementation-defined.
 
   Returns:
-    An array containing the sum of `operand` and the scattered updates.
+    An array containing the max of `operand` and the scattered updates.
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.max,
                                        core.get_aval(lax._const(operand, 0)))
@@ -836,7 +873,7 @@ def scatter(
       implementation-defined.
 
   Returns:
-    An array containing the sum of `operand` and the scattered updates.
+    An array containing the values of `operand` and the scattered updates.
 
   Examples:
     As mentioned above, you should basically never use :func:`scatter` directly,
@@ -846,18 +883,18 @@ def scatter(
     Here is and example of updating entries in an array using :attr:`jax.numpy.ndarray.at`,
     which lowers to an XLA Scatter operation:
 
-    >>> x = jnp.zeros(5)
+    >>> x = jnp.ones(5)
     >>> indices = jnp.array([1, 2, 4])
     >>> values = jnp.array([2.0, 3.0, 4.0])
 
     >>> x.at[indices].set(values)
-    Array([0., 2., 3., 0., 4.], dtype=float32)
+    Array([1., 2., 3., 1., 4.], dtype=float32)
 
     This syntax also supports several of the optional arguments to :func:`scatter`,
     for example:
 
     >>> x.at[indices].set(values, indices_are_sorted=True, mode='promise_in_bounds')
-    Array([0., 2., 3., 0., 4.], dtype=float32)
+    Array([1., 2., 3., 1., 4.], dtype=float32)
 
     By comparison, here is the equivalent function call using :func:`scatter` directly,
     which is not something typical users should ever need to do:
@@ -869,7 +906,7 @@ def scatter(
     ...                 scatter_dims_to_operand_dims=(0,)),
     ...             indices_are_sorted=True,
     ...             mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS)
-    Array([0., 2., 3., 0., 4.], dtype=float32)
+    Array([1., 2., 3., 1., 4.], dtype=float32)
   """
   operand, scatter_indices, updates = core.standard_insert_pvary(
       operand, scatter_indices, updates)
@@ -1662,19 +1699,18 @@ def _dynamic_update_slice_jvp(primals, tangents):
 
 def _dynamic_update_slice_transpose_rule(t, operand, update, *start_indices):
   assert all(not ad.is_undefined_primal(x) for x in start_indices)
-  if ad.is_undefined_primal(update):
-    update_shape = update.aval.shape
-  else:
-    update_shape = update.shape
+  update_shape = (update.aval.shape if ad.is_undefined_primal(update) else
+                  update.shape)
+  update_sharding = update.aval.sharding
   if type(t) is ad_util.Zero:
     operand_t = ad_util.Zero(operand.aval) if ad.is_undefined_primal(operand) else None
     update_t = ad_util.Zero(update.aval) if ad.is_undefined_primal(update) else None
   else:
-    dus = dynamic_update_slice_p.bind
-    ds = dynamic_slice_p.bind
-    zeros = lax._zeros(t, shape=update_shape)
-    operand_t = dus(t, zeros, *start_indices) if ad.is_undefined_primal(operand) else None
-    update_t = ds(t, *start_indices, slice_sizes=update_shape) if ad.is_undefined_primal(update) else None
+    zeros = lax._zeros(t, shape=update_shape, sharding=update_sharding)
+    operand_t = (dynamic_update_slice_p.bind(t, zeros, *start_indices)
+                 if ad.is_undefined_primal(operand) else None)
+    update_t = (dynamic_slice_p.bind(t, *start_indices, slice_sizes=update_shape)
+                if ad.is_undefined_primal(update) else None)
   return [operand_t, update_t] + [None] * len(start_indices)
 
 def _dynamic_update_slice_batching_rule(batched_args, batch_dims):
