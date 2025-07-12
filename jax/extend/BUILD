@@ -49,6 +49,7 @@ py_library_providing_imports_info(
         "//jax:core",
         "//jax:custom_derivatives",
         "//jax:lax",
+        "//jax:random",
     ],
 )
 
@@ -63,6 +64,7 @@ pytype_strict_library(
     srcs = ["backend.py"],
     deps = [
         "//jax:api",
+        "//jax:compiler",
         "//jax:util",
         "//jax:xla_bridge",
     ],
@@ -74,6 +76,7 @@ pytype_strict_library(
     deps = [
         "//jax",
         "//jax:extend_src",
+        "//jax:random",
     ],
 )
 

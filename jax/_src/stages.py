@@ -223,7 +223,8 @@ class Lowering:
         f"cost analysis unsupported on XLA computation: {type(self)}")
 
   def compile(
-      self, compiler_options: CompilerOptions | None = None) -> Executable:
+      self, compiler_options: CompilerOptions | None = None, *,
+      device_assignment: tuple[xc.Device, ...] | None = None) -> Executable:
     """Compile and return a corresponding ``Executable``."""
     raise NotImplementedError(
         f"cost analysis unsupported on XLA computation: {type(self)}")
@@ -426,6 +427,13 @@ class Compiled(Stage):
     except NotImplementedError:
       return None
 
+  @property
+  def out_info(self):  # PyTree of OutInfo
+    out_avals = self._executable.out_avals
+    out_shardings = self._executable._out_shardings
+    return self.out_tree.unflatten(
+        [OutInfo(o.shape, o.dtype, s) for o, s in zip(out_avals, out_shardings)])
+
   def runtime_executable(self) -> Any | None:
     """An arbitrary object representation of this executable.
 
@@ -605,9 +613,14 @@ class Lowered(Stage):
          for o, s in zip(out_avals, out_shardings)])
 
   def compile(
-      self, compiler_options: CompilerOptions | None = None) -> Compiled:
+      self, compiler_options: CompilerOptions | None = None, *,
+      device_assignment: tuple[xc.Device, ...] | None = None) -> Compiled:
     """Compile, returning a corresponding ``Compiled`` instance."""
-    kw: dict[str, Any] = {"compiler_options": compiler_options}
+
+    kw: dict[str, Any] = {
+        "compiler_options": compiler_options,
+        "device_assignment": device_assignment
+    }
     return Compiled(
         self._lowering.compile(**kw),  # pytype: disable=wrong-keyword-args
         self.args_info,

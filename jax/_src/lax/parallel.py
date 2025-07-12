@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import partial
+from dataclasses import dataclass
 import itertools
 import math
 
@@ -927,7 +928,7 @@ def _allreduce_impl(prim, pos_reducer, *args, axes, axis_index_groups):
   return [pos_reducer(arg, axes) for arg in args]
 
 def _allreduce_effectful_abstract_eval(*args, axes, axis_index_groups):
-  _check_axis_names(axes)
+  _check_axis_names(axes, 'psum')
   named_axes = tuple(axis for axis in axes if not isinstance(axis, int))
   pos_axes = tuple(axis for axis in axes if isinstance(axis, int))
   if axis_index_groups is not None:
@@ -948,7 +949,7 @@ def _psum_invariant_abstract_eval(name, *args, axes, axis_index_groups):
         *args, axes=axes, axis_index_groups=axis_index_groups)
 
   assert isinstance(axes, tuple)
-  _check_axis_names(axes)
+  _check_axis_names(axes, 'psum')
   arg_vma = [a.vma for a in args]
   # If intersection between arg_vma and axes is empty, error
   if any(not set(axes) & a for a in arg_vma):
@@ -984,12 +985,14 @@ def _pmin_pmax_abstract_eval(name, *args, axes, axis_index_groups):
   return _psum_invariant_abstract_eval(
       name, *args, axes=axes, axis_index_groups=axis_index_groups)
 
-def _check_axis_names(axes):
+def _check_axis_names(axes, api_name):
   named_axes = tuple(axis for axis in axes if not isinstance(axis, int))
   axis_env = core.get_axis_env()
   for name in named_axes:
     if not axis_env.axis_exists(name):
-      raise NameError(f"unbound axis name: {name}")
+      raise NameError(
+          f"Found an unbound axis name: {name}. To fix this, please call"
+          f" {api_name} under `jax.shard_map`.")
 
 def _allreduce_lowering(prim, pos_fn, ctx, *args, axes, axis_index_groups):
   if axis_index_groups is not None and ("tpu" in ctx.module_context.platforms):
@@ -1165,7 +1168,7 @@ def _ppermute_batcher(axis_data, vals_in, dims_in, axis_name, perm):
   return v.take(perm_indices, d), d
 
 def _raise_to_shaped_abstract_eval(x, *, axis_name, **params):
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'ppermute')
   collective_vma_rule('ppermute', axis_name, x)
   return x
 
@@ -1177,8 +1180,13 @@ batching.fancy_primitive_batchers[ppermute_p] = _ppermute_batcher
 batching.skippable_batchers[ppermute_p] = partial(_names_in_param, 'axis_name')
 
 
+@dataclass(frozen=True)
 class SingleSideCollectiveEffect(core.Effect):
   __str__ = lambda _: "one-sided communication"
+  def __hash__(self):
+    return hash(SingleSideCollectiveEffect)
+  def __eq__(self, other):
+    return isinstance(other, SingleSideCollectiveEffect)
 
 
 single_side_collective_effect = SingleSideCollectiveEffect()
@@ -1205,17 +1213,17 @@ def _psend_lowering_gpu(ctx, x, *, axis_name, perm):
   sharding = xc.OpSharding()
   sharding.type = xc.OpSharding.Type.MANUAL
   mlir.set_sharding(send_op, sharding)
-  return [send_op.results]
+  return send_op.results
 
 
 mlir.lowerable_effects.add_type(SingleSideCollectiveEffect)
 
 
 def _psend_abstract_eval(x, *, axis_name, **params):
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'psend')
   return abstract_token, {
       *map(core.NamedAxisEffect, axis_name),
-      SingleSideCollectiveEffect(),
+      single_side_collective_effect,
   }
 
 
@@ -1260,7 +1268,7 @@ def _precv_abstract_eval(
     token, *, out_shape, axis_name, **params
 ):
   return out_shape, {*map(core.NamedAxisEffect, axis_name),
-                     SingleSideCollectiveEffect()}
+                     single_side_collective_effect}
 
 precv_p = core.Primitive("precv")
 precv_p.multiple_results = False
@@ -1486,7 +1494,7 @@ def _all_to_all_effectful_abstract_eval(
   del tiled  # expand_dims and squeeze is done in `all_to_all` if `True`
   if not isinstance(axis_name, (list, tuple)):
     axis_name = (axis_name,)
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'all_to_all')
   shape = list(input_aval.shape)
   axis_size = (
       _axis_size(axis_name)
@@ -1575,7 +1583,7 @@ def _ragged_all_to_all_effectful_abstract_eval(
         " size, but got shape {}".format(recv_sizes.shape)
     )
 
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'ragged_all_to_all')
   out_aval = output.update(shape=output.shape, weak_type=False)
   effects = {*map(core.NamedAxisEffect, axis_name)}
   return out_aval, effects
@@ -1611,36 +1619,33 @@ def _ragged_all_to_all_transpose(
         lax.full(t.shape[0], 0, dtype='int32').at[output_offsets_].set(1)
         .at[output_offsets_ + recv_sizes].add(-1))
     mask = lax.expand_dims(mask, (*range(1, t.ndim),))
+    mask = lax.broadcast_in_dim(mask, shape=t.shape, broadcast_dimensions=tuple(range(t.ndim)))
     output_t = lax.select(mask, lax._zeros(t), t)
   return [operand_t, output_t] + [None] * 4
 
 def _ragged_all_to_all_batched_collective(axis_data, vals_in, dims_in,
                                           axis_name, axis_index_groups):
-  del axis_data
+  if axis_data.name in axis_name:
+    raise NotImplementedError("Please open a feature request!")
   if axis_index_groups:
     raise NotImplementedError("Please open a feature request!")
+  size = axis_data.size
 
-  operand, output, input_offsets, send_sizes, output_offsets, recv_sizes = vals_in
-  operand_dim, output_dim, input_offsets_dim, send_sizes_dim, output_offsets_dim, recv_sizes_dim = dims_in
-  if not (operand.shape[operand_dim] == output.shape[output_dim] == input_offsets.shape[input_offsets_dim] == send_sizes.shape[send_sizes_dim] == output_offsets.shape[output_offsets_dim] == recv_sizes.shape[recv_sizes_dim]):
-    raise ValueError("all operands must have the same batch sizes")
+  def bdim_at_second(x, d):
+    assert x.ndim == 2
+    return batching.broadcast(x, size, 1) if d is None else x if d == 1 else x.T
+  def merge(x): return x.reshape(-1, *x.shape[2:])
+  def split(x): return x.reshape(size, -1, *x.shape[1:])
 
-  sliced_results = []
-  for i in range(operand.shape[operand_dim]):
-    sliced_operand = slicing.slice_in_dim(operand, start_index=i, limit_index=i+1, axis=operand_dim).flatten()
-    sliced_output = slicing.slice_in_dim(output, start_index=i, limit_index=i+1, axis=output_dim)
-    sliced_output_shape = sliced_output.shape
-    sliced_output = sliced_output.flatten()
-    sliced_input_offsets = slicing.slice_in_dim(input_offsets, start_index=i, limit_index=i+1, axis=input_offsets_dim).flatten()
-    sliced_send_sizes = slicing.slice_in_dim(send_sizes, start_index=i, limit_index=i+1, axis=send_sizes_dim).flatten()
-    sliced_output_offsets = slicing.slice_in_dim(output_offsets, start_index=i, limit_index=i+1, axis=output_offsets_dim).flatten()
-    sliced_recv_sizes = slicing.slice_in_dim(recv_sizes, start_index=i, limit_index=i+1, axis=recv_sizes_dim).flatten()
-    sliced_result = ragged_all_to_all(sliced_operand, sliced_output, sliced_input_offsets, sliced_send_sizes, sliced_output_offsets, sliced_recv_sizes, axis_name=axis_name, axis_index_groups=axis_index_groups)
-    sliced_result = lax.expand_dims(sliced_result.reshape(sliced_output_shape), dimensions=(output_dim,))
-    sliced_results.append(sliced_result)
-
-  concat_result = lax.concatenate(sliced_results, dimension=output_dim)
-  return concat_result, operand_dim
+  operand, output = map(partial(batching.bdim_at_front, size=size), vals_in[:2], dims_in[:2])
+  N, M = operand.shape[1], output.shape[1]
+  input_offsets, send_sizes, output_offsets, recv_sizes = \
+      map(bdim_at_second, vals_in[2:], dims_in[2:])
+  input_offsets += lax.iota(input_offsets.dtype, size)[None, :] * N
+  output_offsets += lax.iota(output_offsets.dtype, size)[None, :] * M
+  vals_in = operand, output, input_offsets, send_sizes, output_offsets, recv_sizes
+  result = split(ragged_all_to_all(*map(merge, vals_in), axis_name=axis_name))
+  return result, 0
 
 ragged_all_to_all_p = core.Primitive('ragged_all_to_all')
 ragged_all_to_all_p.def_effectful_abstract_eval(_ragged_all_to_all_effectful_abstract_eval)
@@ -1800,7 +1805,7 @@ def _all_gather_effectful_abstract_eval(
 ):
   if not isinstance(axis_name, (list, tuple)):
     axis_name = (axis_name,)
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'all_gather')
   new_shape = list(x_aval.shape)
   if tiled:
     new_shape[all_gather_dimension] *= axis_size
@@ -1918,7 +1923,7 @@ all_gather_invariant_p = core.Primitive('all_gather_invariant')
 def _all_gather_invariant_effectful_abstract_eval(
     x_aval, *, all_gather_dimension, axis_name, axis_size, tiled
 ):
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'all_gather_invariant')
   new_shape = list(x_aval.shape)
   if tiled:
     new_shape[all_gather_dimension] *= axis_size
@@ -2024,7 +2029,7 @@ def _reduce_scatter_effectful_abstract_eval(
 ):
   if not isinstance(axis_name, (list, tuple)):
     axis_name = (axis_name,)
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'reduce_scatter')
   new_shape = list(x_aval.shape)
   scatter_dim_input_size = x_aval.shape[scatter_dimension]
   if tiled:
@@ -2242,7 +2247,7 @@ def _axis_index_lowering(ctx, *, axis_name):
 def _axis_index_effectful_abstract_eval(*, axis_name):
   effect = {core.NamedAxisEffect(axis_name)}
   axis_name = (axis_name,) if not isinstance(axis_name, tuple) else axis_name
-  _check_axis_names(axis_name)
+  _check_axis_names(axis_name, 'axis_index')
   mesh = get_abstract_mesh()
   sharding = NamedSharding(mesh, P())
   vma = ((frozenset(axis_name) if mesh._any_axis_manual else frozenset())
@@ -2278,7 +2283,7 @@ def _pgather_impl(src, idx, *, axes):
 def _pgather_abstract_eval(src, idx, *, axes):
   # TODO: Avals with names rule: remove all axes from src, insert those from idx
   #       The order is important, because it is ok to re-insert one of the deleted axes!
-  _check_axis_names(axes)
+  _check_axis_names(axes, 'pgather')
   shape = list(src.shape)
   for axis in sorted((a for a in axes if isinstance(a, int)), reverse=True):
     del shape[axis]

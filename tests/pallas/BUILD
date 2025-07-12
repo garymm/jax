@@ -404,6 +404,7 @@ jax_multiplatform_test(
         "tpu_v5e",
         "tpu_v5p",
     ],
+    shard_count = 8,
     deps = [
         "//jax:extend",
         "//jax:pallas_tpu",
@@ -486,6 +487,11 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "tpu_pallas_pipeline_test",
     srcs = ["tpu_pallas_pipeline_test.py"],
+    args = [
+        # Timeout on deadlocks for a better error message.
+        "--xla_tpu_debug_sflag_wait_timeout_ms=500",
+        "--xla_tpu_debug_sflag_wait_shalt_on_detection",
+    ],
     enable_backends = ["tpu"],
     enable_configs = [
         "tpu_v5e_x8",
@@ -532,6 +538,7 @@ jax_multiplatform_test(
         "tpu_v5p",
     ],
     deps = [
+        "//jax:experimental",
         "//jax:pallas_tpu",
     ] + py_deps([
         "absl/testing",

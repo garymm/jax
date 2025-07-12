@@ -565,15 +565,6 @@ jax_multiplatform_test(
 )
 
 jax_multiplatform_test(
-    name = "infeed_test",
-    srcs = ["infeed_test.py"],
-    deps = py_deps([
-        "absl/testing",
-        "numpy",
-    ]),
-)
-
-jax_multiplatform_test(
     name = "jax_jit_test",
     srcs = ["jax_jit_test.py"],
     main = "jax_jit_test.py",
@@ -616,6 +607,7 @@ jax_multiplatform_test(
     deps = [
         "//jax:jet",
         "//jax:stax",
+        "//jax/extend:core",
     ] + py_deps([
         "absl/testing",
         "numpy",
@@ -1813,6 +1805,9 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "mutable_array_test",
     srcs = ["mutable_array_test.py"],
+    shard_count = {
+        "cpu": 10,
+    },
     deps = py_deps([
         "absl/testing",
         "numpy",
@@ -1886,17 +1881,6 @@ jax_multiplatform_test(
     name = "clear_backends_test",
     srcs = ["clear_backends_test.py"],
     deps = py_deps("absl/testing"),
-)
-
-jax_multiplatform_test(
-    name = "attrs_test",
-    srcs = ["attrs_test.py"],
-    deps = [
-        "//jax:experimental",
-    ] + py_deps([
-        "numpy",
-        "absl/testing",
-    ]),
 )
 
 jax_multiplatform_test(
@@ -2061,6 +2045,7 @@ jax_multiplatform_test(
     name = "fused_attention_stablehlo_test",
     srcs = ["fused_attention_stablehlo_test.py"],
     enable_backends = ["gpu"],
+    shard_count = 8,
     tags = ["multiaccelerator"],
     deps = py_deps([
         "absl/testing",
@@ -2151,6 +2136,9 @@ jax_multiplatform_test(
     shard_count = {
         "gpu": 4,
     },
+    tags = [
+        "multiaccelerator",
+    ],
     deps = py_deps([
         "absl/testing",
         "numpy",
@@ -2166,6 +2154,18 @@ jax_py_test(
         "//jax:experimental",
         "//jax:test_util",
     ] + py_deps("absl/testing"),
+)
+
+jax_py_test(
+    name = "traceback_test",
+    srcs = ["traceback_test.py"],
+    deps = [
+        "//jax",
+        "//jax:test_util",
+    ] + py_deps([
+        "absl/testing",
+        "numpy",
+    ]),
 )
 
 exports_files(

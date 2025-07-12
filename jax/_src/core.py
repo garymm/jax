@@ -179,6 +179,10 @@ class Jaxpr:
     return p.text(self.pretty_print(use_color=True))
 
   def replace(self, **kwargs):
+    # TODO(mattjj,necula): enable to find places we mess up debug_info
+    # if "debug_info" not in kwargs:
+    #   if "invars" in kwargs or "outvars" in kwargs:
+    #     raise ValueError("must update debug info")
     jaxpr = Jaxpr(
         constvars=kwargs.pop("constvars", self.constvars),
         invars=kwargs.pop("invars", self.invars),
@@ -396,6 +400,12 @@ class JaxprEqn:
   primitive: Primitive
   params: dict[str, Any]
   effects: Effects
+
+  # The source_info.name_stack is always relative to the enclosing jaxpr (only)
+  # and does not include any name context from the caller of the jaxpr. A jaxpr
+  # might have multiple callers, after all.
+  # TODO(phawkins): update source_info.tracebacks to also be relative to the
+  # enclosing jaxpr.
   source_info: source_info_util.SourceInfo
   ctx: JaxprEqnContext
 
@@ -517,18 +527,24 @@ class Literal:
   def pretty_print(self, context: JaxprPpContext, *, print_dtype: bool = True):
     del context  # unused
     dtype = getattr(self.aval, 'dtype', None)
+    val_str = str(self.val) if not np.shape(self.val) else "[...]"
     if print_dtype and dtype:
-      return f'{self.val}:{self.aval.str_short(short_dtypes=True)}'
+      return f'{val_str}:{self.aval.str_short(short_dtypes=True)}'
     else:
-      return f'{self.val}'
+      return f'{val_str}'
 
   def __repr__(self):
-    return f'{self.val}'
+    return f'Literal({self.val})'
 
+# The types of constants that can be used with core.Literal. Other constants
+# end up as `constvars`.
 literalable_types: set[type] = set()
 
 def is_literalable(x: Any) -> bool:
-  return type(x) in dtypes.python_scalar_dtypes or (type(x) in literalable_types and not np.shape(x))
+  for t in type(x).__mro__:
+    if t in literalable_types:
+      return (not np.shape(x) or config.use_simplified_jaxpr_constants.value)
+  return False
 
 Atom = Union[Var, Literal]
 
@@ -544,6 +560,8 @@ class Primitive:
   ref_primitive: bool = False
   # set for primitives that can skip canonicalization of values
   skip_canonicalization: bool = False
+
+  is_effectful = None
 
   def __init__(self, name: str):
     self.name = name
@@ -593,6 +611,10 @@ class Primitive:
     self.abstract_eval = effectful_abstract_eval
     return effectful_abstract_eval
 
+  def def_effectful_abstract_eval2(self, abstract_eval):
+    self.abstract_eval = _generic_effectful_abstract_eval(abstract_eval, self)
+    return abstract_eval
+
   def def_bind_with_trace(self, bind_with_trace):
     self.bind_with_trace = bind_with_trace
     return bind_with_trace
@@ -615,6 +637,18 @@ class Primitive:
 def _effect_free_abstract_eval(abstract_eval):
   def abstract_eval_(*args, **kwargs):
     return abstract_eval(*args, **kwargs), no_effects
+  return abstract_eval_
+
+@dataclass(frozen=True)
+class GenericEffect(Effect):
+  prim: Primitive
+effects.lowerable_effects.add_type(GenericEffect)
+effects.control_flow_allowed_effects.add_type(GenericEffect)
+effects.custom_derivatives_allowed_effects.add_type(GenericEffect)
+
+def _generic_effectful_abstract_eval(abstract_eval, prim):
+  def abstract_eval_(*args, **kwargs):
+    return abstract_eval(*args, **kwargs), {GenericEffect(prim)}
   return abstract_eval_
 
 # -------------------- lifting --------------------
@@ -1968,17 +2002,16 @@ def _make_lengths_same(sharding, ndim):
     return sharding.update(spec=P(*pspec[:ndim], unreduced=pspec.unreduced))
   assert False, "unreachable"
 
-# TODO(yashkatariya): Only works with User/Auto. Generalize it to work with
-# Collective too.
 def modify_spec_for_auto_manual(spec, mesh) -> P:
-  new_spec = []
+  new_spec = []  # type: ignore
   for s in spec:
-    if not s:
-      new_spec.append(s)
+    if s is None:
+      new_spec.append(s)  # type: ignore
+    elif isinstance(s, tuple):
+      new_spec.append(tuple(
+          p for p in s if mesh._name_to_type[p] == AxisType.Explicit))
     else:
-      temp_s = s[0] if isinstance(s, tuple) else s
-      new_spec.append(s if mesh._name_to_type[temp_s] == AxisType.Explicit
-                      else None)
+      new_spec.append(s if mesh._name_to_type[s] == AxisType.Explicit else None)  # type: ignore
   new_unreduced = {u for u in spec.unreduced
                    if mesh._name_to_type[u] == AxisType.Explicit}
   new_reduced = {u for u in spec.reduced
@@ -2221,8 +2254,8 @@ def standard_insert_pvary(*args):
     return args
   if not args:
     return args
-  in_vma = [frozenset() if (aval := get_aval(a)) is abstract_token
-            else aval.vma for a in args]  # pytype: disable=attribute-error
+  in_vma = [aval.vma if isinstance(aval := get_aval(a), ShapedArray)
+            else frozenset() for a in args]
   out_vma = frozenset.union(*in_vma)
   return [
       pvary(arg, tuple(n for n in out_vma if n not in src))
@@ -2406,13 +2439,14 @@ class MutableArray:
   committed = _committed = property(lambda self: self._buf._committed)
   def __getitem__(self, idx): return self._aval._getitem(self, idx)
   def __setitem__(self, idx, x): return self._aval._setitem(self, idx, x)
-  def __repr__(self) -> str: return 'Mutable' + repr(self[...])
+  def __repr__(self) -> str: return 'Mutable' + repr(self._buf)
   def __len__(self) -> int: return self._aval._len(self)
 pytype_aval_mappings[MutableArray] = lambda x: x._aval
 
-def mutable_array(init_val):
-  return mutable_array_p.bind(init_val)
+def mutable_array(init_val, *, memory_space: Any = None):
+  return mutable_array_p.bind(init_val, memory_space=memory_space)
 mutable_array_p = Primitive('mutable_array')
+mutable_array_p.is_effectful = lambda params: True  # type: ignore
 mutable_array_p.ref_primitive = True
 
 class InternalMutableArrayEffect(effects.Effect):
@@ -2421,12 +2455,17 @@ internal_mutable_array_effect = InternalMutableArrayEffect()
 effects.control_flow_allowed_effects.add_type(InternalMutableArrayEffect)
 
 @mutable_array_p.def_effectful_abstract_eval
-def mutable_array_abstract_eval(init_aval):
+def mutable_array_abstract_eval(init_aval, *, memory_space: Any):
   from jax._src.state.types import AbstractRef  # pytype: disable=import-error
-  return AbstractRef(init_aval), {internal_mutable_array_effect}
+  return (AbstractRef(init_aval, memory_space=memory_space),
+          {internal_mutable_array_effect})
 
 @mutable_array_p.def_impl
-def _mutable_array_impl(init_val):
+def _mutable_array_impl(init_val, *, memory_space: Any):
+  if memory_space is not None:
+    raise NotImplementedError(
+        "mutable_array with memory space only works inside of a `jit`."
+    )
   from jax._src.state.types import AbstractRef  # pytype: disable=import-error
   from jax._src.lax.lax import _array_copy  # pytype: disable=import-error
   return MutableArray(AbstractRef(get_aval(init_val)), _array_copy(init_val))
@@ -2434,6 +2473,7 @@ def _mutable_array_impl(init_val):
 def freeze(ref):
   return freeze_p.bind(ref)
 freeze_p = Primitive('freeze')
+freeze_p.is_effectful = lambda params: True  # type: ignore
 freeze_p.ref_primitive = True
 
 @freeze_p.def_effectful_abstract_eval
@@ -2806,7 +2846,7 @@ def unmapped_aval(size: AxisSize, axis: int | None,
 
 def _map_shaped_array(
     size: int, axis: int | None, aval: ShapedArray) -> ShapedArray:
-  # assert axis is None or aval.shape[axis] == size
+  assert axis is None or aval.shape[axis] == size
   if axis is None:
     return aval
   sharding = aval.sharding.update(spec=tuple_delete(aval.sharding.spec, axis))
@@ -2924,6 +2964,7 @@ def typematch(t1: AbstractValue, t2: AbstractValue) -> bool:
   """Determine whether `t1` and `t2` are equivalent. Ignores weak_type."""
   t1 = t1.normalize()
   t2 = t2.normalize()
+  from jax._src.state.types import AbstractRef  # pytype: disable=import-error
   if t1 == t2:
     return True
   elif (isinstance(t1, (ShapedArray, DShapedArray)) and
@@ -2934,6 +2975,11 @@ def typematch(t1: AbstractValue, t2: AbstractValue) -> bool:
     # See https://github.com/jax-ml/jax/issues/26474
     return (t1.dtype == t2.dtype and definitely_equal_shape(t1.shape, t2.shape)
             and t1.vma == t2.vma)  # type: ignore
+  elif isinstance(t1, AbstractRef) and isinstance(t2, AbstractRef):
+    # We want to use the regular typecheck for ShapedArray here.
+    return ((t1.memory_space is None or t2.memory_space is None  # type: ignore
+            or t1.memory_space == t2.memory_space)  # type: ignore
+            and typematch(t1.inner_aval, t2.inner_aval))  # type: ignore
   else:
     return False
 
@@ -3062,6 +3108,13 @@ def _check_jaxpr(
       else:
         env[v] = MutableTypecheckVal(aval, MutableQuasiDynamicData(qdd))
 
+  # # Don't return refs
+  if config.mutable_array_checks.value:
+    from jax._src.state.types import AbstractRef  # pytype: disable=import-error
+    for v in jaxpr.outvars:
+      if isinstance(v.aval, AbstractRef):
+        raise JaxprTypeError("returned a ref!")
+
   # Check type annotations on lambda binders.
   for v in it.chain(jaxpr.constvars, jaxpr.invars):
     check_type(ctx_factory, env, v.aval)
@@ -3106,7 +3159,7 @@ def _check_jaxpr(
       for eff in eqn.effects:
         if isinstance(eff, effects.JaxprInputEffect):
           eqn_invar = eqn.invars[eff.input_index]
-          if eqn_invar in mut_arrays:
+          if type(eqn_invar) is Literal or eqn_invar in mut_arrays:
             continue
           if (jaxpr_index := in_idx.get(eqn_invar, sentinel)) is sentinel:
             raise JaxprTypeError(
@@ -3225,7 +3278,7 @@ def _check_call(ctx_factory, prim, in_atoms, params):
                            f"{substitute(v.aval)}")
     env[v] = x.val if type(x) is Literal else x
 
-  _check_jaxpr(ctx_factory, call_jaxpr)
+  check_jaxpr(call_jaxpr)
 
   invars, outvars = call_jaxpr.invars, call_jaxpr.outvars
   in_map : dict[Var,  InDBIdx] = {v:  InDBIdx(i) for i, v in enumerate( invars)}
@@ -3442,7 +3495,7 @@ def pp_eqn(eqn: JaxprEqn, context: JaxprPpContext, settings: JaxprPpSettings
   rule = (_pp_eqn if not settings.custom_pp_eqn_rules else
           pp_eqn_rules.get(eqn.primitive, _pp_eqn))
   doc = rule(eqn, context, settings)
-  user_frame = source_info_util.user_frame(eqn.source_info)
+  user_frame = source_info_util.user_frame(eqn.source_info.traceback)
   return doc if user_frame is None else pp.source_map(doc, user_frame)
 
 def _pp_eqn(eqn: JaxprEqn, context: JaxprPpContext, settings: JaxprPpSettings,

@@ -31,7 +31,7 @@ from functools import partial
 import math
 import operator
 import os
-from typing import (Any, IO, Literal, Protocol, TypeVar, Union, overload)
+from typing import Any, IO, Literal, Protocol, TypeVar, Union, overload
 import warnings
 
 import numpy as np
@@ -58,6 +58,7 @@ from jax._src.numpy import ufuncs
 from jax._src.numpy import util
 from jax._src.numpy.sorting import argsort, sort
 from jax._src.numpy.vectorize import vectorize
+from jax._src.sharding_impls import canonicalize_sharding
 from jax._src.typing import (
   Array, ArrayLike, DType, DTypeLike, DeprecatedArg, DimSize, Shape, SupportsShape
 )
@@ -4875,7 +4876,7 @@ def column_stack(tup: np.ndarray | Array | Sequence[ArrayLike]) -> Array:
     - :func:`jax.numpy.concatenate`: concatenation along existing axes.
     - :func:`jax.numpy.vstack`: stack vertically, i.e. along axis 0.
     - :func:`jax.numpy.hstack`: stack horizontally, i.e. along axis 1.
-    - :func:`jax.numpy.hstack`: stack depth=wise, i.e. along axis 2.
+    - :func:`jax.numpy.dstack`: stack depth-wise, i.e. along axis 2.
 
   Examples:
     Scalar values:
@@ -5882,7 +5883,8 @@ def identity(n: DimSize, dtype: DTypeLike | None = None) -> Array:
 @export
 def arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
            step: ArrayLike | None = None, dtype: DTypeLike | None = None,
-           *, device: xc.Device | Sharding | None = None) -> Array:
+           *, device: xc.Device | Sharding | None = None,
+           out_sharding: NamedSharding | P | None = None) -> Array:
   """Create an array of evenly-spaced values.
 
   JAX implementation of :func:`numpy.arange`, implemented in terms of
@@ -5909,6 +5911,10 @@ def arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
       be determined via type promotion of `start`, `stop`, and `step`.
     device: (optional) :class:`~jax.Device` or :class:`~jax.sharding.Sharding`
       to which the created array will be committed.
+    out_sharding: (optional) :class:`~jax.NamedSharding` or :class:`~jax.P` to
+      which the created array will be committed. Use `out_sharding` argument,
+      if using explicit sharding
+      (https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html)
 
   Returns:
     Array of evenly-spaced values from ``start`` to ``stop``, separated by ``step``.
@@ -5951,16 +5957,20 @@ def arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
     - :func:`jax.numpy.linspace`: generate a fixed number of evenly-spaced values.
     - :func:`jax.lax.iota`: directly generate integer sequences in XLA.
   """
-  # TODO(vfdev-5): optimize putting the array directly on the device specified
-  # instead of putting it on default device and then on the specific device
-  output = _arange(start, stop=stop, step=step, dtype=dtype)
-  if device is not None:
-    return api.device_put(output, device=device)
-  return output
+  sharding = util.choose_device_or_out_sharding(
+      device, out_sharding, 'jnp.arange')
+  if sharding is None or not sharding._is_concrete:
+    assert sharding is None or isinstance(sharding, NamedSharding)
+    return _arange(start, stop=stop, step=step, dtype=dtype,
+                   out_sharding=sharding)
+  else:
+    output = _arange(start, stop=stop, step=step, dtype=dtype)
+    return api.device_put(output, sharding)
 
 
 def _arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
-            step: ArrayLike | None = None, dtype: DTypeLike | None = None) -> Array:
+            step: ArrayLike | None = None, dtype: DTypeLike | None = None,
+            out_sharding: NamedSharding | None = None) -> Array:
   dtypes.check_user_dtype_supported(dtype, "arange")
   if not config.dynamic_shapes.value:
     util.check_arraylike("arange", start)
@@ -5993,11 +6003,13 @@ def _arange(start: ArrayLike | DimSize, stop: ArrayLike | DimSize | None = None,
         not dtypes.issubdtype(start_dtype, dtypes.extended)):
       ceil_ = ufuncs.ceil if isinstance(start, core.Tracer) else np.ceil
       start = ceil_(start).astype(int)
-    return lax.iota(dtype, start)  # type: ignore[arg-type]
+    return lax.broadcasted_iota(dtype, (start,), 0, out_sharding=out_sharding)  # type: ignore[arg-type]
   else:
     if step is None and start == 0 and stop is not None:
-      return lax.iota(dtype, np.ceil(stop).astype(int))
-    return array(np.arange(start, stop=stop, step=step, dtype=dtype))
+      return lax.broadcasted_iota(dtype, (np.ceil(stop).astype(int),), 0,
+                                  out_sharding=out_sharding)
+    return array(np.arange(start, stop=stop, step=step, dtype=dtype),
+                 device=out_sharding)
 
 
 def _arange_dynamic(
@@ -6340,7 +6352,7 @@ def repeat(a: ArrayLike, repeats: ArrayLike, axis: int | None = None, *,
     return _auto_repeat(_repeat, a, repeats, axis, total_repeat_length,
                         out_sharding)
   ctx_mesh = get_abstract_mesh()
-  if ctx_mesh._are_all_axes_explicit:
+  if ctx_mesh._any_axis_explicit:
     aval = core.typeof(a)
     if axis is None or aval.sharding.spec[axis] is not None:
       raise ValueError(
@@ -6358,14 +6370,19 @@ def repeat(a: ArrayLike, repeats: ArrayLike, axis: int | None = None, *,
         "Please pass sharding to `jnp.repeat` via `out_sharding` parameter.")
 
 def _auto_repeat(fun, a, repeats, axis, total_repeat_length, out_sharding):
+  out_sharding = canonicalize_sharding(out_sharding, 'repeat')
   if total_repeat_length is None:
     return auto_axes(partial(fun, repeats=repeats, axis=axis,
                              total_repeat_length=total_repeat_length),
-                     out_sharding=out_sharding)(a)
+                     out_sharding=out_sharding,
+                     axes=out_sharding.mesh.explicit_axes  # type: ignore
+                     )(a)
   else:
     return auto_axes(
         partial(fun, axis=axis, total_repeat_length=total_repeat_length),
-        out_sharding=out_sharding)(a, repeats=repeats)
+        out_sharding=out_sharding,
+        axes=out_sharding.mesh.explicit_axes  # type: ignore
+        )(a, repeats=repeats)
 
 def _repeat(a: ArrayLike, *, repeats: ArrayLike, axis: int | None = None,
             total_repeat_length: int | None = None) -> Array:
@@ -9259,6 +9276,8 @@ def _searchsorted_via_scan(unrolled: bool, sorted_arr: Array, query: Array, side
     return (where(go_left, low, mid), where(go_left, mid, high)), ()
   n_levels = int(np.ceil(np.log2(len(sorted_arr) + 1)))
   init = (array(0, dtype=dtype), array(len(sorted_arr), dtype=dtype))
+  vma = core.typeof(sorted_arr).vma
+  init = tuple(core.pvary(i, tuple(vma)) for i in init)
   carry, _ = control_flow.scan(body_fun, init, (), length=n_levels,
                                unroll=n_levels if unrolled else 1)
   return carry[1]

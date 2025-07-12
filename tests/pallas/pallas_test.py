@@ -33,7 +33,6 @@ from jax._src import config
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax.control_flow.for_loop import for_loop
-from jax._src.pallas.pallas_call import _trace_kernel_to_jaxpr
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
 import numpy as np
@@ -148,7 +147,6 @@ class PallasBaseTest(jtu.JaxTestCase):
       self.skipTest("Only works on non-Windows platforms")
 
     super().setUp()
-    _trace_kernel_to_jaxpr.cache_clear()
 
   def pallas_call(self, *args, **kwargs):
     return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
@@ -495,6 +493,8 @@ class PallasCallTest(PallasBaseTest):
     self.assertAllClose(pids[0:4], np.array([0] * 4, dtype=np.int32))
 
   def test_hoisted_consts(self):
+    if config.use_simplified_jaxpr_constants.value:
+      self.skipTest("TODO: decide if we want to keep these errors")
     # See https://github.com/jax-ml/jax/issues/21557.
     # to_store will be hoisted as a constant. Choose distinct shapes from in/outs.
     to_store = np.arange(128, dtype=np.float32).reshape((1, 128))
@@ -1173,6 +1173,8 @@ class ApiErrorTest(PallasBaseTest):
       f(a)
 
   def test_pallas_call_index_map_captures_consts(self):
+    if config.use_simplified_jaxpr_constants.value:
+      self.skipTest("TODO: decide if we want to keep these errors")
     a = np.arange(256, dtype=np.int32)
     index_map_result = np.array([0], dtype=np.int32)
     f = self.pallas_call(lambda x_ref, o1_ref: None,
@@ -1271,11 +1273,24 @@ class ApiErrorTest(PallasBaseTest):
     with self.assertRaisesRegex(
         ValueError,
         r" Attempting to pass a Ref"
-        r" MemRef<None>{float32\[8,32\]}"
+        r" Ref{float32\[8,32\]}"
         r" to a primitive: dot_general - did you forget to unpack \(\[...\]\)"
         r" the ref?",
     ):
       dot_general_kernel(x, y)
+
+  def test_pallas_error_for_writing_ref_to_ref(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+    )
+    def kernel(x_ref, o_ref):
+      o_ref[...] = x_ref
+
+    x = jnp.ones((8, 128), dtype=jnp.float32)
+    with self.assertRaisesRegex(
+        ValueError, "Cannot store a Ref into another Ref",
+    ):
+      kernel(x)
 
 
 class ApiErrorInterpretTest(ApiErrorTest):

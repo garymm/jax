@@ -150,7 +150,7 @@ class VectorLayoutInferer {
           any_op.emitOpError("Multi-result ops not supported");
           return failure();
         }
-      } else if (isa<arith::ExtFOp, arith::ExtSIOp>(any_op)) {
+      } else if (isa<arith::ExtSIOp, tpu::ExtFOp>(any_op)) {
         if (inferExt(&any_op).failed()) {
           return failure();
         }
@@ -162,7 +162,7 @@ class VectorLayoutInferer {
         if (inferExt(&any_op).failed()) {
           return failure();
         }
-      } else if (isa<arith::TruncFOp, arith::TruncIOp>(any_op)) {
+      } else if (isa<arith::TruncIOp, tpu::TruncFOp>(any_op)) {
         if (inferTrunc(&any_op).failed()) {
           return failure();
         }
@@ -971,19 +971,19 @@ class VectorLayoutInferer {
     // offset but since we are forcing all operands and result to be the same
     // layout, we can set all offsets to zero for now. Also maybe we should
     // consider adding this to elementwise rule.
-    if (op.getType().getShape() == ArrayRef<int64_t>(target_shape_) &&
-        op.getType().getElementTypeBitWidth() == 32) {
-      VectorLayout layout(kNativeBitwidth, {0, 0}, default_tiling_,
-                          ImplicitDim::kNone);
-      setLayout(op, {layout, layout}, layout);
-    } else if (op.getIndices().getType().getShape() ==
-                   ArrayRef<int64_t>{4 * target_shape_[0], target_shape_[1]} &&
-               op.getType().getElementTypeBitWidth() == 8) {
-      VectorLayout layout(8, {0, 0}, nativeTiling(8), ImplicitDim::kNone);
-      setLayout(op, {layout, layout}, layout);
-    } else {
-      return op.emitOpError("Not implemented");
+    const int bitwidth = op.getType().getElementTypeBitWidth();
+    if (bitwidth != 8 && bitwidth != 16 && bitwidth != 32) {
+      return op.emitOpError(
+          "Not implemented: Only 8-, 16- or 32-bit gathers supported");
     }
+    if (bitwidth != op.getIndices().getType().getElementTypeBitWidth()) {
+      return op.emitOpError(
+          "Not implemented: Gather indices and result have different "
+          "bitwidths");
+    }
+    VectorLayout layout(bitwidth, {0, 0}, nativeTiling(bitwidth),
+                        ImplicitDim::kNone);
+    setLayout(op, {layout, layout}, layout);
     return success();
   }
 
@@ -1528,14 +1528,10 @@ class VectorLayoutInferer {
       return success();
     }
 
-    // Shape cast (..., m, n, k * target_shape_[1]) -> (..., m, n * k *
-    // target_shape_[1]) for 32-bit types. We allow multiple major or minor
-    // dimensions to be folded or unfolded.
-    if (kNativeBitwidth == bitwidth && res_shape.size() >= 2 &&
+    // Shape casts for {32/16/8}-bit vector types with rank >= 2.
+    if (bitwidth >= 8 && bitwidth <= kNativeBitwidth && res_shape.size() >= 2 &&
         src_shape.size() >= 2 && src_shape.back() % native_tiling[1] == 0 &&
-        res_shape.back() % native_tiling[1] == 0 &&
-        (mlir::tpu::canFoldMinorDimsToSize(src_shape, res_shape.back()) ||
-         mlir::tpu::canFoldMinorDimsToSize(res_shape, src_shape.back()))) {
+        res_shape.back() % native_tiling[1] == 0) {
       // TODO(jsreeram): Add support for picking space-efficient tilings for
       // small 2nd minor dim shapes.
       // Example 1: (4, 2, 1024) -> (4, 2048) If we infer src and tgt layout to
@@ -1724,8 +1720,10 @@ class VectorLayoutInferer {
     unsigned dst_bitwidth = dst_ty.getElementTypeBitWidth();
     auto some_layout = getLayout(op->getOperand(0));
     TPU_CHECK_OP(some_layout.has_value(), "missing vector layout");
-    if (dyn_cast<arith::ExtFOp>(op)) {
-      TPU_CHECK_OP(dst_bitwidth == 32, "Only supported extensions to 32-bit");
+    if (isa<tpu::ExtFOp>(op)) {
+      TPU_CHECK_OP(dst_bitwidth == 32 || dst_bitwidth == 16,
+                   "Only supported extensions to 32-bit (float32) or 16-bit "
+                   "(bfloat16)");
     }
     auto &layout = *some_layout;
     Layout src_layout;
@@ -1846,7 +1844,6 @@ class VectorLayoutInferer {
     // types, so make sure we infer layout based on a shaped-typed operand.
     std::optional<VectorLayout> out_layout_candidate;
     std::optional<VectorLayout> out_layout;
-    SmallVector<std::optional<Layout>, 4> in_layouts;
     int64_t bitwidth = -1;
     // Find the bitwidth of the operands/results. They must all be the same
     // except for the case of i1s, which use a "fake" bitwidth for layouts.
@@ -1876,24 +1873,19 @@ class VectorLayoutInferer {
           DCHECK(!out_layout.has_value());
           bitwidth = layout.bitwidth();
           out_layout = layout;
-          in_layouts.push_back(layout);
         } else if (bitwidth != layout.bitwidth()) {
           DCHECK_EQ(vty.getElementTypeBitWidth(), 1);
-          in_layouts.push_back(std::nullopt);
         } else if (is_fully_replicated(some_layout)) {
           // If the input is fully replicated, don't use it to commit to any
           // layout. Replicated values are easy to relayout.
-          in_layouts.push_back(std::nullopt);
           out_layout_candidate = layout;
         } else if (!out_layout) {
           // TODO(apaszke): There are probably smarter ways to choose layout.
           out_layout = layout;
-          in_layouts.push_back(some_layout);
         } else {
           if (auto new_out =
                   VectorLayout::join(layout, *out_layout, vty.getShape())) {
             out_layout = *new_out;
-            in_layouts.push_back(some_layout);
           } else {
             // When we detect a layout conflict we cannot reconcile, we remove
             // any replication bits that might have been present in out_layout,
@@ -1905,17 +1897,15 @@ class VectorLayoutInferer {
                              {out_layout->offsets()[0].value_or(0),
                               out_layout->offsets()[1].value_or(0)},
                              out_layout->tiling(), out_layout->implicit_dim());
-            in_layouts.push_back(std::nullopt);
           }
         }
       } else {
         TPU_CHECK_OP(op->getOperand(i).getType().isSignlessIntOrIndexOrFloat(),
                      "expected only vector and scalar operands");
-        in_layouts.push_back({kNoLayout});
       }
     }
     Layout final_out_layout = std::nullopt;
-    if (auto out_vty = dyn_cast<VectorType>(op->getResult(0).getType())) {
+    if (isa<VectorType>(op->getResult(0).getType())) {
       if (out_layout) {
         final_out_layout = *out_layout;
       } else if (out_layout_candidate) {
@@ -1926,14 +1916,11 @@ class VectorLayoutInferer {
         return failure();
       }
     }
-    CHECK_EQ(in_layouts.size(), op->getNumOperands()) << Print(op);
-    SmallVector<Layout, 4> final_in_layouts;
-    for (int i = 0; i < in_layouts.size(); ++i) {
-      if (in_layouts[i]) {
-        final_in_layouts.push_back(*in_layouts[i]);
-      } else {
-        final_in_layouts.push_back(final_out_layout);
-      }
+    SmallVector<Layout> final_in_layouts(op->getNumOperands());
+    for (unsigned i = 0; i < op->getNumOperands(); ++i) {
+      final_in_layouts[i] = isa<VectorType>(op->getOperand(i).getType())
+                                ? final_out_layout
+                                : kNoLayout;
     }
     setLayout(op, final_in_layouts, final_out_layout);
     return success();

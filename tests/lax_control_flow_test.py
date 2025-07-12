@@ -29,6 +29,7 @@ import numpy as np
 
 import jax
 from jax._src import core
+from jax._src import config
 from jax import dtypes
 from jax import lax
 from jax import random
@@ -178,7 +179,8 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     super().setUp()
     lax_control_flow._initial_style_open_jaxpr.cache_clear()
     lax_control_flow._initial_style_jaxpr.cache_clear()
-    lax_control_flow.common._pad_jaxpr_constvars.cache_clear()
+    lax_control_flow.common._dedup_consts.cache_clear()
+    lax_control_flow.common._pad_constvars.cache_clear()
 
   def testCallableErrors(self):
     not_callable = 42
@@ -2496,7 +2498,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertRaisesRegex(
         ValueError,
         re.escape(
-            "compiling computation `scan` that requires {} "
+            "compiling computation `jit(scan)` that requires {} "
             "replicas, but only {} XLA devices are available."
             .format(too_big, jax.device_count())),
         lambda: f_loop(jnp.ones(too_big)))
@@ -2787,10 +2789,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     x = jnp.asarray(rng.randn(32, 2, 32).astype('float32'))
     _, vjp_fun = jax.vjp(cumprod, x)
 
+    # TODO(mattjj): should we re-enable this check? The constants are now
+    # inlined in the Jaxprs, not easy to find them.
     # Need to spelunk into vjp_fun. This is fragile, and if it causes problems
     # just skip this test and make an issue for mattjj.
-    *_, ext_res = vjp_fun.args[0].args[0]
-    self.assertIs(ext_res, x)
+    if not config.use_simplified_jaxpr_constants.value:
+      *_, ext_res = vjp_fun.args[0].args[0]
+      self.assertIs(ext_res, x)
 
     if remat is not None:
       # TODO(mattjj): make the numpy.ndarray test pass w/ remat

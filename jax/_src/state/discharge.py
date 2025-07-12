@@ -73,7 +73,7 @@ PyTreeDef = tree_util.PyTreeDef
 # `Read/Write/Accum` effects.
 
 def discharge_state(jaxpr: core.Jaxpr, consts: Sequence[Any], * ,
-                    should_discharge: bool | Sequence[bool] = True
+                    should_discharge: bool | Sequence[bool] = True,
                     ) -> tuple[core.Jaxpr, list[Any]]:
   """Converts a jaxpr that takes in `Ref`s into one that doesn't."""
   if isinstance(should_discharge, bool):
@@ -84,7 +84,7 @@ def discharge_state(jaxpr: core.Jaxpr, consts: Sequence[Any], * ,
   eval_jaxpr = lu.wrap_init(partial(_eval_jaxpr_discharge_state, jaxpr,
                                     should_discharge, consts),
                             debug_info=jaxpr.debug_info)
-  new_jaxpr, _ , new_consts, () = pe.trace_to_jaxpr_dynamic(eval_jaxpr, in_avals)
+  new_jaxpr, _ , new_consts = pe.trace_to_jaxpr_dynamic(eval_jaxpr, in_avals)
   return new_jaxpr, new_consts
 
 @dataclasses.dataclass
@@ -703,7 +703,7 @@ def _convert_outputs_to_writes(
     return []
   res_ref_avals = [AbstractRef(v.aval) if not isinstance(v.aval, AbstractRef)
                    else v.aval for v in jaxpr.outvars]
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(eval_jaxpr,
                    debug_info=jaxpr.debug_info),
       [*in_avals, *res_ref_avals])
@@ -723,7 +723,7 @@ def _convert_inputs_to_reads(num_res: int, jaxpr: core.Jaxpr) -> core.Jaxpr:
       split_list([v.aval for v in jaxpr.invars], [num_res])
   res_ref_avals = [AbstractRef(aval) if not isinstance(aval, AbstractRef) else
                    aval for aval in res_val_avals]
-  jaxpr, _, (), () = pe.trace_to_jaxpr_dynamic(
+  jaxpr, _, () = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(eval_jaxpr,
                    debug_info=jaxpr.debug_info),
       [*res_ref_avals, *orig_ref_avals])
@@ -946,7 +946,7 @@ def _run_state_partial_eval_custom(
     def staged(*args):
       out = run_state_p.bind(*args, **staged_params)
       return out[num_res:]
-    staged_call_jaxpr, _, (), () = pe.trace_to_jaxpr_dynamic(
+    staged_call_jaxpr, _, () = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(staged, debug_info=jaxpr_staged.debug_info),
         [v.aval for v in res_staged_invars])
     eqn_staged = pe.new_jaxpr_eqn(res_staged_invars,
@@ -1015,7 +1015,7 @@ def _transpose_jaxpr(jaxpr: core.Jaxpr, which_linear: Sequence[bool],
     _, ct_args = partition_list(used_cts, tangent_args)
     ad.backward_pass(tangent_jaxpr, False, (), (*primals_args, *ct_args), ())
     return []
-  jaxpr_trans, _, consts, () = pe.trace_to_jaxpr_dynamic(
+  jaxpr_trans, _, consts = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(trans,
                    debug_info=jaxpr.debug_info),
       [v.aval for v in jaxpr.invars])
@@ -1102,7 +1102,7 @@ def _initial_style_jaxpr(fun: Callable,
   fun_, out_tree_thunk = api_util.flatten_fun_nokwargs(
       lu.wrap_init(fun, debug_info=debug),
       tree_util.treedef_tuple((in_tree,)))
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fun_, in_avals)
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(fun_, in_avals)
   return jaxpr, consts, out_tree_thunk()
 
 
@@ -1148,8 +1148,7 @@ def run_state_reference(f: Callable[..., None]):
     return in_tree.unflatten(out_flat)
   return wrapped
 
-
-@register_discharge_rule(pjit.pjit_p)
+@register_discharge_rule(pjit.jit_p)
 def _pjit_state_discharge_rule(
     in_avals, out_avals, *args, jaxpr, in_shardings, out_shardings,
     in_layouts, out_layouts, **params):
@@ -1168,7 +1167,7 @@ def _pjit_state_discharge_rule(
   new_out_shardings = (sharding_impls.UNSPECIFIED,) * len(discharged_jaxpr.outvars)
   new_in_layouts = (None,) * len(discharged_jaxpr.invars)
   new_out_layouts = (None,) * len(discharged_jaxpr.outvars)
-  out_and_ref_vals = pjit.pjit_p.bind(
+  out_and_ref_vals = pjit.jit_p.bind(
       *args, jaxpr=discharged_closed_jaxpr, in_shardings=new_in_shardings,
       out_shardings=new_out_shardings, in_layouts=new_in_layouts,
       out_layouts=new_out_layouts, **params)

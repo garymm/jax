@@ -1072,7 +1072,7 @@ class ShardingTest(jtu.JaxTestCase):
   def test_mesh_repr(self):
     mesh = jtu.create_mesh((1, 1), ('x', 'y'))
     mesh_repr = repr(mesh)
-    self.assertIn('device_ids', mesh_repr)
+    self.assertIn('axis_sizes', mesh_repr)
     self.assertIn('axis_names', mesh_repr)
 
   def test_are_shardings_equivalent(self):
@@ -1335,6 +1335,28 @@ class ShardingTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(
         ValueError, 'Got invalid memory kind'):
       NamedSharding(abstract_mesh, P(), memory_kind='weird_device')
+
+  def test_pspec_mix_axis_types(self):
+    mesh = AbstractMesh(
+        (2, 2, 2, 2), ('a', 'b', 'c', 'd'),
+        axis_types=(AxisType.Explicit, AxisType.Explicit, AxisType.Auto,
+                    AxisType.Manual))
+    aval = jax.core.ShapedArray((16, 8, 4, 2), np.float32)
+
+    out = aval.update(sharding=NamedSharding(mesh, P(('a', 'b', 'c'), 'd')))
+    self.assertEqual(out.sharding.spec, P(('a', 'b'), None, None, None))
+
+    out = aval.update(sharding=NamedSharding(mesh, P(('a', 'c'), 'b', 'd')))
+    self.assertEqual(out.sharding.spec, P('a', 'b', None, None))
+
+    out = aval.update(sharding=NamedSharding(mesh, P(('a', 'b'), 'c', 'd')))
+    self.assertEqual(out.sharding.spec, P(('a', 'b'), None, None, None))
+
+    with self.assertRaisesRegex(
+        ValueError,
+        'Tuple subset of `PartitionSpec` cannot contain `Manual` mixed with'
+        ' `Auto` or `Explicit`'):
+      aval.update(sharding=NamedSharding(mesh, P(('a', 'd'), 'b', 'c')))
 
   def test_pspec_unreduced(self):
     pspec = P('a', 'b', None, unreduced={'c'}, reduced={'d'})

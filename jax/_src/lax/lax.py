@@ -54,7 +54,6 @@ from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import pxla
-from jax._src.interpreters import xla
 from jax._src.interpreters.batching import RaggedAxis
 from jax._src.lax import slicing
 from jax._src import mesh as mesh_lib
@@ -267,10 +266,11 @@ def _merge_dyn_shape(
 
 def _dyn_shape_staging_rule(trace, source_info, prim, out_aval, *args,
                             **params):
-  out_tracer = pe.DynamicJaxprTracer(trace, out_aval, source_info)
-  eqn = pe.new_jaxpr_eqn([trace.getvar(x) for x in args],
-                         [trace.makevar(out_tracer)],
+  var = trace.frame.newvar(out_aval)
+  eqn = pe.new_jaxpr_eqn([x.val for x in args],
+                         [var],
                          prim, params, core.no_effects, source_info)
+  out_tracer = pe.DynamicJaxprTracer(trace, out_aval, var, source_info)
   trace.frame.add_eqn(eqn)
   return out_tracer
 
@@ -1780,7 +1780,7 @@ def _trace_composite_to_jaxpr(fun: Callable,
                               debug_info: core.DebugInfo):
   flat_fun, out_tree = api_util.flatten_fun_nokwargs(
       lu.wrap_init(fun, debug_info=debug_info), in_tree)
-  jaxpr, _, consts, _ = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
   if any(isinstance(c, core.Tracer) for c in consts):
     raise UnexpectedTracerError(
         "Found a JAX Tracer as a constant in the decomposition for the "
@@ -1788,8 +1788,8 @@ def _trace_composite_to_jaxpr(fun: Callable,
         "closes over a value that is involved in a JAX transformation. "
         "Any values that aren't explicitly known at compile time must be "
         "explicitly passed as arguments to the composite.")
-  closed_jaxpr = core.ClosedJaxpr(jaxpr, consts)
-  return closed_jaxpr, out_tree
+  closed_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jaxpr))
+  return closed_jaxpr, consts, out_tree
 
 
 def composite(
@@ -1872,7 +1872,7 @@ def composite(
           "explicitly passed as arguments to the composite."
           "\n\nNote: If you are passing jax arrays as attributes, use numpy "
           "arrays instead.")
-    closed_jaxpr, out_tree = _trace_composite_to_jaxpr(
+    closed_jaxpr, consts, out_tree = _trace_composite_to_jaxpr(
         partial(decomposition, **kwargs), in_tree, in_avals, name, debug_info
     )
     attributes = []
@@ -1882,9 +1882,9 @@ def composite(
           HashableArray(v) if isinstance(v, np.ndarray) else v for v in leaves
       )
       attributes.append((k, leaves, treedef))
-    flat_args = core.standard_insert_pvary(*flat_args)
+    flat_consts_and_args = core.standard_insert_pvary(*consts, *flat_args)
     out_flat = composite_p.bind(
-        *flat_args,
+        *flat_consts_and_args,
         name=name,
         attributes=tuple(attributes),
         version=version,
@@ -1920,7 +1920,6 @@ def _composite_lowering(
   """
   func_op, _, _ = mlir.lower_called_computation(
       name,
-      ctx.name_stack,
       jaxpr,
       ctx.module_context,
       ctx.avals_out,
@@ -2986,7 +2985,7 @@ def _reduction_jaxpr(computation: Callable,
       comp,
       debug_info=api_util.debug_info("reduction_jaxpr", computation,
                                      (aval, aval), {}))
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(comp_wrapped, (aval, aval))
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(comp_wrapped, (aval, aval))
   if any(isinstance(c, core.Tracer) for c in consts):
     raise NotImplementedError(
         "Reduction computations can't close over Tracers. Please open an issue "
@@ -3002,7 +3001,7 @@ def _variadic_reduction_jaxpr(computation: Callable[[Any, Any], Any],
   flat_in_avals, in_tree = tree_util.tree_flatten((avals, avals))
   comp = lu.wrap_init(computation, debug_info=debug_info)
   flat_comp, out_tree = api_util.flatten_fun_nokwargs(comp, in_tree)
-  jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(flat_comp, tuple(flat_in_avals))
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_comp, tuple(flat_in_avals))
   if any(isinstance(c, core.Tracer) for c in consts):
     raise NotImplementedError(
         "Reduction computations can't close over Tracers. Please open an issue "
@@ -3576,6 +3575,11 @@ def full_like(x: ArrayLike | DuckTypedArray,
       sharding = x.sharding  # type: ignore
   val = full(fill_shape, _convert_element_type(fill_value, dtype, weak_type),
              sharding=sharding)
+  if config._check_vma.value:
+    # TODO(yashkatariya): Maybe use `shaped_abstractify` here instead of
+    # `typeof` because `x` can be anything that implements the
+    # `DuckTypedArray` protocol.
+    val = core.pvary(val, tuple(core.typeof(x).vma))
   return val
 
 
@@ -4046,15 +4050,6 @@ def broadcast_hlo(
     out.append(arg)
   return out
 
-def multi_sharding_in_dim(ctx, ops, in_avals, out_aval):
-  out = []
-  for op, in_aval in zip(ops, in_avals):
-    if in_aval.sharding == out_aval.sharding or in_aval.sharding is None:
-      out.append(op)
-    else:
-      out.append(mlir.lower_with_sharding_in_types(ctx, op, out_aval))
-  return out
-
 
 def _nary_lower_hlo(
     op: Callable, ctx, *args: ir.Value, accuracy=None, **params
@@ -4063,8 +4058,8 @@ def _nary_lower_hlo(
   """
   del params
   avals_in, (aval_out,) = ctx.avals_in, ctx.avals_out
-  args = mlir.multi_broadcast_in_dim(ctx, args, avals_in, aval_out.shape)
-  args = multi_sharding_in_dim(ctx, args, avals_in, aval_out)
+  args = mlir.multi_broadcast_in_dim(ctx, args, avals_in, aval_out.shape,
+                                     aval_out.sharding)
 
   out = op(*args)
   if accuracy:
@@ -4221,7 +4216,7 @@ def _sin_lowering(ctx, x, accuracy):
   return _nary_lower_hlo(hlo.sine, ctx, x, accuracy=accuracy)
 
 
-def _sin_p_lin(nzs, x, accuracy):
+def _sin_lin(nzs, x, accuracy):
   nz, = nzs
   cos_x = cos(x) # TODO: allow this to happen in the linearized computation (need to fix backward_pass)
   return (
@@ -4233,7 +4228,7 @@ def _sin_p_lin(nzs, x, accuracy):
 
 sin_p = standard_unop(_float | _complex, 'sin')
 ad.defjvp(sin_p, lambda g, x, accuracy: mul(g, cos(x, accuracy=accuracy)))
-ad.primitive_linearizations[sin_p] = _sin_p_lin
+ad.primitive_linearizations[sin_p] = _sin_lin
 mlir.register_lowering(sin_p, _sin_lowering)
 core.pp_eqn_rules[sin_p] = _unary_with_accuracy_pp_rule
 batching.ragged_prop_rules[sin_p] = batching.ragged_mask_elementwise_rule
@@ -4338,7 +4333,8 @@ def _complex_transpose_rule(t, x, y):
     else:
       return [None, _unbroadcast(y.aval, imag(neg(t)))]
 
-_complex_dtype = lambda dtype, *args, **kwargs: (np.zeros((), dtype) + np.zeros((), np.complex64)).dtype
+def _complex_dtype(dtype, *args, **kwargs):
+  return (np.zeros((), dtype) + np.zeros((), np.complex64)).dtype
 complex_p = naryop(_complex_dtype, [_complex_elem_types, _complex_elem_types],
                   'complex')
 ad.deflinear2(complex_p, _complex_transpose_rule)
@@ -4846,7 +4842,7 @@ def _convert_element_type_jvp_rule(tangent, primal_result, operand, *,
     return convert_element_type_p.bind(tangent, new_dtype=new_tangent_dtype,
                                        weak_type=weak_type, sharding=sharding)
 
-def _convert_elt_type_folding_rule(consts, eqn):
+def _convert_elt_type_folding_rule(consts, params, out_avals):
   # We constant-fold convert_element_types applied to constants if those
   # constants are Python builtin numeric types or numpy.ndarrays (so as not
   # to perform any device operations when constant-folding) and if the output
@@ -4856,29 +4852,30 @@ def _convert_elt_type_folding_rule(consts, eqn):
   # we output a Python builtin numeric type.
   # TODO(mattjj): allow constant-folding CPU-backed JAX arrays
   c, = consts
-  o, = eqn.outvars
-  new_dtype = eqn.params['new_dtype']
+  out_aval, = out_avals
+  new_dtype = params['new_dtype']
   if (type(c) in {np.ndarray, *dtypes.python_scalar_dtypes} and
-      isinstance(o.aval, core.UnshapedArray) and not np.shape(c) and
+      isinstance(out_aval, core.UnshapedArray) and not np.shape(c) and
       not dtypes.issubdtype(new_dtype, dtypes.extended)):
     out = np.array(c)
     if (dtypes.issubdtype(out.dtype, np.complexfloating) and
         not dtypes.issubdtype(new_dtype, np.complexfloating)):
       out = out.real
     out = out.astype(new_dtype)
-    if not o.aval.weak_type:
-      return [out], None
+    if not out_aval.weak_type:
+      return [out]
     out = out.item()
-    if core.get_aval(out).dtype is o.aval.dtype:
-      return [out], None
-  return [None], eqn
+    if core.get_aval(out).dtype is out_aval.dtype:
+      return [out]
+  return None
 
 def _convert_elt_type_fwd_rule(eqn):
-  v, = eqn.invars
-  if (v.aval.dtype == eqn.params['new_dtype'] and
-      v.aval.weak_type == eqn.params['weak_type'] and
-      not dtypes.issubdtype(v.aval.dtype, dtypes.extended) and
-      (eqn.params['sharding'] is None or eqn.params['sharding'] == v.aval.sharding)):
+  t, = eqn.invars
+  aval = t.aval
+  if (aval.dtype == eqn.params['new_dtype'] and
+      aval.weak_type == eqn.params['weak_type'] and
+      not dtypes.issubdtype(aval.dtype, dtypes.extended) and
+      (eqn.params['sharding'] is None or eqn.params['sharding'] == aval.sharding)):
     return [0], None
   else:
     return [None], eqn
@@ -6323,6 +6320,9 @@ def _ragged_dot_general_lower(
 
   # TODO(pravnar): Remove this once we have sharding support.
   def use_default_lowering():
+    if config.jax_ragged_dot_use_ragged_dot_instruction.value:
+      # Default lowering is via the pattern match, hence we return False.
+      return False
     axis_context = ctx.module_context.axis_context
     return (
         isinstance(axis_context, SPMDAxisContext)
@@ -6378,7 +6378,7 @@ mlir.register_lowering(ragged_dot_general_p,
                        mlir.lower_fun(_ragged_dot_general_impl,
                                       multiple_results=False))
 
-for platform in ['tpu']:
+for platform in ['tpu', 'gpu']:
   mlir.register_lowering(
       ragged_dot_general_p,
       partial(_ragged_dot_general_lower, platform=platform),
@@ -7064,6 +7064,14 @@ def _reshape_shape_rule(operand, *, new_sizes, dimensions, sharding):
 def _split_on_one_axis(op_shape, new_sizes, name):
   if len(new_sizes) <= len(op_shape):
     return False, []
+  orig_op_shape, orig_new_sizes = op_shape, new_sizes
+
+  num_1s = 0
+  while op_shape[-1] == 1 and new_sizes[-1] == 1:
+    num_1s += 1
+    op_shape = op_shape[:-1]
+    new_sizes = new_sizes[:-1]
+
   i, j, count, out = 0, 0, 0, []
   while j < len(new_sizes):
     if op_shape[i] == new_sizes[j]:
@@ -7072,9 +7080,10 @@ def _split_on_one_axis(op_shape, new_sizes, name):
       count += 1
       if count > 1:
         raise core.ShardingTypeError(
-            f'{name} on more than 1 axis is not supported. Please specify'
-            ' the sharding of the output via the `sharding` argument of'
-            f' jax.lax.reshape. Got operand.shape={op_shape} and {new_sizes=}')
+            f'{name} on more than 1 axis is not supported. Please specify the'
+            ' sharding of the output via the `sharding` argument of'
+            f' jax.lax.reshape. Got operand.shape={orig_op_shape} and'
+            f' {orig_new_sizes=}')
       temp = [new_sizes[j]]
       next_j = j + 1
       while (math.prod(temp) != op_shape[i] or
@@ -7089,7 +7098,9 @@ def _split_on_one_axis(op_shape, new_sizes, name):
       out.append(temp)
     i += 1
     j += 1
-  assert len(op_shape) == len(out)
+  out.extend([1] * num_1s)
+
+  assert len(orig_op_shape) == len(out)
   return True, out
 
 
@@ -8232,111 +8243,6 @@ def _after_all_lowering(ctx, *operands):
 mlir.register_lowering(after_all_p, _after_all_lowering)
 
 
-class InOutFeedEffect(effects.Effect):
-  pass
-infeed_effect = InOutFeedEffect()
-outfeed_effect = InOutFeedEffect()
-
-effects.custom_derivatives_allowed_effects.add_type(InOutFeedEffect)
-
-def infeed(token, shape=None, partitions=None):
-  """Consumes an infeed value of `shape` from the host. Experimental.
-
-  `token` is used to sequence infeed and outfeed effects.
-  `partitions` may be specified inside a `sharded_jit` function.
-  """
-  flat_shapes, treedef = tree_util.tree_flatten(shape)
-  for shape in flat_shapes:
-    if not isinstance(shape, ShapedArray):
-      raise TypeError("shape argument to infeed must be a pytree of "
-                      "ShapedArray values, got {}".format(shape))
-  if partitions is not None:
-    # Always replicate token.
-    # We specifically use type() to raise an error for PartitionSpecs.
-    if type(partitions) != tuple:  # pylint: disable=unidiomatic-typecheck
-      raise ValueError(f"'partitions' argument to infeed should be a tuple, "
-                       f"got {partitions}")
-    partitions = partitions + (None,)
-  xs_and_token = infeed_p.bind(token, shapes=tuple(flat_shapes),
-                               partitions=partitions)
-  return (treedef.unflatten(xs_and_token[:-1]), xs_and_token[-1])
-
-def _infeed_abstract_eval(token, *, shapes, partitions):
-  if token is not abstract_token:
-    raise TypeError("First argument to infeed must be a token")
-  return (*shapes, abstract_token), {infeed_effect}
-
-
-infeed_p = Primitive("infeed")
-infeed_p.multiple_results = True
-infeed_p.def_impl(partial(dispatch.apply_primitive, infeed_p))
-infeed_p.def_effectful_abstract_eval(_infeed_abstract_eval)
-mlir.lowerable_effects.add_type(InOutFeedEffect)
-
-
-def _infeed_lowering(ctx, token, *, shapes, partitions):
-  output_types = safe_map(mlir.aval_to_ir_type, ctx.avals_out[:-1])
-  flat_output_types = mlir.flatten_ir_types(output_types)
-  # TODO(phawkins): verify `shapes` have a major-to-minor layout.
-  layouts = ir.ArrayAttr.get([
-      ir.ArrayAttr.get(
-          [mlir.i64_attr(i)
-           for i in range(len(aval.shape) - 1, -1, -1)])
-      for aval in shapes
-  ])
-  infeed = hlo.InfeedOp(
-      flat_output_types + [hlo.TokenType.get()],
-      token,
-      infeed_config=ir.StringAttr.get(''),
-      layout=layouts)
-  if partitions is not None:
-    mlir.set_sharding(infeed, xla.sharding_to_proto(partitions))
-  token = infeed.results[-1]
-  outs = infeed.results[:-1]
-  return mlir.unflatten_ir_values_like_types(outs, output_types) + [
-      token,
-  ]
-
-mlir.register_lowering(infeed_p, _infeed_lowering)
-
-
-def outfeed(token, xs, partitions = None):
-  """Outfeeds value `xs` to the host. Experimental.
-
-  `token` is used to sequence infeed and outfeed effects.
-  `partitions` may be specified inside a `sharded_jit` or `pjit` function.
-  """
-  if partitions is not None:
-    # We specifically use type() to raise an error for PartitionSpecs.
-    if type(partitions) != tuple:  # pylint: disable=unidiomatic-typecheck
-      raise ValueError(f"'partitions' argument to outfeed should be a tuple, "
-                       f"got {partitions}")
-  flat_xs, _ = tree_util.tree_flatten(xs)
-  return outfeed_p.bind(token, *flat_xs, partitions=partitions)
-
-def _outfeed_abstract_eval(token, *xs, partitions):
-  if token is not abstract_token:
-    raise TypeError("First argument to outfeed must be a token")
-  return abstract_token, {outfeed_effect}
-
-outfeed_p = Primitive("outfeed")
-outfeed_p.def_impl(partial(dispatch.apply_primitive, outfeed_p))
-outfeed_p.def_effectful_abstract_eval(_outfeed_abstract_eval)
-mlir.lowerable_effects.add_type(InOutFeedEffect)
-
-
-def _outfeed_lowering(ctx, token, *xs, partitions):
-  outfeed = hlo.OutfeedOp(
-      mlir.flatten_ir_values(xs),
-      token,
-      outfeed_config=ir.StringAttr.get(''))
-  if partitions is not None:
-    mlir.set_sharding(outfeed, xla.sharding_to_proto(partitions))
-  return outfeed.results
-
-mlir.register_lowering(outfeed_p, _outfeed_lowering)
-
-
 def rng_uniform(a, b, shape):
   """Stateful PRNG generator. Experimental and its use is discouraged.
 
@@ -8551,6 +8457,26 @@ batching.defvectorized(copy_p)
 def _propagate_mem_kind_copy(in_mem_kind):
   return in_mem_kind
 pxla.memory_kind_propagate_rule[copy_p] = _propagate_mem_kind_copy
+
+# The dce_sink_p primitive marks a value as "used" from the perspective of DCE
+# so the computation producing it won't be eliminated.
+def dce_sink(val):
+  tree_util.tree_map(dce_sink_p.bind, val)
+
+class NoDCEEffect(effects.Effect):
+  pass
+no_dce_effect = NoDCEEffect()
+effects.control_flow_allowed_effects.add_type(NoDCEEffect)
+effects.lowerable_effects.add_type(NoDCEEffect)
+
+dce_sink_p = core.Primitive('dce_sink')
+dce_sink_p.def_impl(lambda _: [])
+dce_sink_p.multiple_results = True
+dce_sink_p.def_effectful_abstract_eval(lambda _: ([], {no_dce_effect}))
+mlir.register_lowering(dce_sink_p, lambda ctx, _: [])
+ad.deflinear(dce_sink_p, lambda _: [])
+pe.def_trivial_padding(dce_sink_p)
+batching.defvectorized(dce_sink_p)
 
 def rng_bit_generator(key, shape, dtype=np.uint32,
                       algorithm=RandomAlgorithm.RNG_DEFAULT,
@@ -8848,7 +8774,6 @@ def _zero(x):
   x_aval = core.get_aval(x)
   out = full_like(x, shape=(), fill_value=0,
                   sharding=x_aval.sharding.update(spec=P()))
-  out = core.pvary(out, tuple(x_aval.vma))
   return out
 
 _ones: Callable = partial(full_like, fill_value=1)
@@ -8857,7 +8782,6 @@ def _one(x):
   x_aval = core.get_aval(x)
   out = full_like(x, shape=(), fill_value=1,
                   sharding=x_aval.sharding.update(spec=P()))
-  out = core.pvary(out, tuple(x_aval.vma))
   return out
 
 _twos: Callable = partial(full_like, fill_value=2)

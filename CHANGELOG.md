@@ -18,6 +18,7 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 
 * New features:
   * Added `jax.P` which is an alias for `jax.sharding.PartitionSpec`.
+  * Added {func}`jax.tree.reduce_associative`.
 
 * Breaking changes:
   * {func}`jax.jit` now requires `fun` to be passed by position, and additional
@@ -34,10 +35,38 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
     moved to the `jax.sharding` endpoint. So use `jax.sharding.reshard`,
     `jax.sharding.auto_axes` and `jax.sharding.explicit_axes` instead of their
     experimental endpoints.
+  * `lax.infeed` and `lax.outfeed` were removed, after being deprecated in
+    JAX 0.6. The `transfer_to_infeed` and `transfer_from_outfeed` methods were
+    also removed the `Device` objects.
+  * The `jax.extend.core.primitives.pjit_p` primitive has been renamed to
+    `jit_p`, and its `name` attribute has changed from `"pjit"` to `"jit"`.
+    This affects the string representations of jaxprs. The same primitive is no
+    longer exported from the `jax.experimental.pjit` module.
+  * The (undocumented) function `jax.extend.backend.add_clear_backends_callback`
+    has been removed. Users should use `jax.extend.backend.register_backend_cache`
+    instead.
 
 * Deprecations:
   * {obj}`jax.dlpack.SUPPORTED_DTYPES` is deprecated; please use the new
     {func}`jax.dlpack.is_supported_dtype` function.
+  * {func}`jax.scipy.special.sph_harm` has been deprecated following a similar
+    deprecation in SciPy; use {func}`jax.scipy.special.sph_harm_y` instead.
+  * From {mod}`jax.interpreters.xla`, the previously deprecated symbols
+    `abstractify` and `pytype_aval_mappings` have been removed.
+  * {func}`jax.interpreters.xla.canonicalize_dtype` is deprecated. For
+    canonicalizing dtypes, prefer {func}`jax.dtypes.canonicalize_dtype`.
+    For checking whether an object is a valid jax input, prefer
+    {func}`jax.core.valid_jaxtype`.
+  * From {mod}`jax.core`, the previously deprecated symbols `AxisName`,
+    `ConcretizationTypeError`, `call_p`, `closed_call_p`, `get_type`, and
+    `typecheck` have been removed.
+  * From {mod}`jax.lib.xla_client`, the previously deprecated symbols
+    `DeviceAssignment`, `get_topology_for_devices`, and `mlir_api_version`
+    have been removed.
+  * `jax.extend.ffi` was removed after being deprecated in v0.5.0.
+    Use {mod}`jax.ffi` instead.
+  * {func}`jax.lib.xla_bridge.get_compile_options` is deprecated, and replaced by
+    {func}`jax.extend.backend.get_compile_options`.
 
 ## JAX 0.6.2 (June 17, 2025)
 

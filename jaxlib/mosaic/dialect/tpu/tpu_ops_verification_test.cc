@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -26,6 +27,7 @@ limitations under the License.
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributeInterfaces.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
@@ -277,6 +279,39 @@ TEST_F(TpuOpsVerificationTest,
                  "Expected mask shape to be broadcastable to result shape.")));
 }
 
+TEST_F(TpuOpsVectorSubcoreVerificationTest, DmaElementTypeMismatch) {
+  auto dma = Create<EnqueueDMAOp>(
+      /*source=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
+      /*source_semaphore=*/AllocaSemaphore(),
+      /*target=*/
+      Create<memref::AllocaOp>(GetMemRefType({1024, 256, 128},
+                                             builder().getI64Type(),
+                                             MemorySpace::kHbm))
+          .getMemref(),
+      /*target_semaphore=*/AllocaSemaphore(),
+      /*device_id=*/nullptr,
+      /*core_id=*/nullptr);
+
+  ASSERT_THAT(
+      VerifyOp(dma),
+      StatusIs(_, HasSubstr("DMA source and target element type mismatch")));
+}
+
+TEST_F(TpuOpsVectorSubcoreVerificationTest, DmaDynamicRankMismatch) {
+  auto dma = Create<EnqueueDMAOp>(
+      /*source=*/AllocaI32({ShapedType::kDynamic, 256, 128}, MemorySpace::kHbm),
+      /*source_semaphore=*/AllocaSemaphore(),
+      /*target=*/
+      AllocaI32({ShapedType::kDynamic, ShapedType::kDynamic, 128},
+                MemorySpace::kHbm),
+      /*target_semaphore=*/AllocaSemaphore(),
+      /*device_id=*/nullptr,
+      /*core_id=*/nullptr);
+
+  ASSERT_THAT(VerifyOp(dma),
+              StatusIs(_, HasSubstr("DMA source and target shape mismatch.")));
+}
+
 TEST_F(TpuOpsVectorSubcoreVerificationTest,
        IndirectDmaHbmChunkGatherVerificationWorks) {
   auto dma = Create<EnqueueIndirectDMAOp>(
@@ -284,8 +319,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({64, 256, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -297,8 +332,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({64, 256, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -310,8 +345,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -323,21 +358,24 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
 
 TEST_F(TpuOpsVectorSubcoreVerificationTest,
        IndirectDmaFilteredGatherVerificationWorks) {
+  Value offset_filter =
+      Create<arith::ConstantOp>(builder().getIntegerAttr(i32(), -1))
+          .getResult();
   auto dma = Create<EnqueueIndirectDMAOp>(
       /*source=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/builder().getI32IntegerAttr(-1));
+      /*offset_filter=*/offset_filter,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -352,8 +390,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({8, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/vector_of_offsets,
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -365,8 +403,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -378,8 +416,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 256, 128}, MemorySpace::kVmemShared),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -394,8 +432,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 32, 128}, MemorySpace::kHbm),
       /*offsets=*/vector_of_offsets,
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_OK(VerifyOp(dma));
 }
@@ -407,30 +445,35 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/true,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/true);
 
   ASSERT_OK(VerifyOp(dma));
 }
 
-TEST_F(TpuOpsVerificationTest, IndirectDmaOnUnsupportedScalarSubcore) {
-  auto func_op =
-      Create<func::FuncOp>("scalar_kernel", builder().getFunctionType({}, {}));
-  func_op->setAttr(
-      TPUDialect::GetCoreTypeKey(),
-      CoreTypeAttr::get(builder().getContext(), CoreType::kScScalarSubcore));
-  builder().setInsertionPointToStart(func_op.addEntryBlock());
-  auto dma = Create<EnqueueIndirectDMAOp>(
-      /*source=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
-      /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
-      /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
-      /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+TEST_F(TpuOpsVerificationTest, IndirectDmaOnUnsupportedCore) {
+  std::vector<CoreType> unsupported_cores = {CoreType::kScScalarSubcore,
+                                             CoreType::kTc};
+  for (CoreType unsupported_core : unsupported_cores) {
+    auto func_op = Create<func::FuncOp>("scalar_kernel",
+                                        builder().getFunctionType({}, {}));
+    func_op->setAttr(
+        TPUDialect::GetCoreTypeKey(),
+        CoreTypeAttr::get(builder().getContext(), unsupported_core));
+    builder().setInsertionPointToStart(func_op.addEntryBlock());
+    auto dma = Create<EnqueueIndirectDMAOp>(
+        /*source=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
+        /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
+        /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
+        /*semaphore=*/AllocaSemaphore(),
+        /*offset_filter=*/nullptr,
+        /*add=*/false);
 
-  ASSERT_THAT(VerifyOp(dma),
-              StatusIs(_, HasSubstr("Enqueue indirect DMA is supported only on "
-                                    "the SC vector subcore")));
+    ASSERT_THAT(
+        VerifyOp(dma),
+        StatusIs(_, HasSubstr("Enqueue indirect DMA is supported only on "
+                              "the SC vector subcore")));
+  }
 }
 
 TEST_F(TpuOpsVerificationTest, IndirectDmaOnUnsupportedTc) {
@@ -444,8 +487,8 @@ TEST_F(TpuOpsVerificationTest, IndirectDmaOnUnsupportedTc) {
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(VerifyOp(dma),
               StatusIs(_, HasSubstr("Enqueue indirect DMA is supported only on "
@@ -463,8 +506,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
           .getMemref(),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -477,8 +520,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest, IndirectDmaWithoutLocalMem) {
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kHbm),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(VerifyOp(dma),
               StatusIs(_, HasSubstr("The transfer must be between HBM and "
@@ -491,8 +534,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest, IndirectDmaOffsetsNotInVmem) {
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kHbm),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(VerifyOp(dma),
               StatusIs(_, HasSubstr("Offsets memref must be in VMEM")));
@@ -508,8 +551,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest, IndirectDma1DSemaphore) {
           GetMemRefType({1}, SemaphoreType::get(builder().getContext()),
                         MemorySpace::kSemaphoreMem))
           .getResult(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(VerifyOp(dma),
               StatusIs(_, HasSubstr("Semaphore must be rank 0")));
@@ -522,8 +565,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({512, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -543,8 +586,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({512, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/vector_of_offsets,
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -560,8 +603,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -579,8 +622,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -597,8 +640,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 256, 512}, MemorySpace::kHbm),
       /*offsets=*/AllocaI32({64, 32}, MemorySpace::kVmem),
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -619,8 +662,8 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
       /*target=*/AllocaI32({1024, 96, 512}, MemorySpace::kHbm),
       /*offsets=*/vector_of_offsets,
       /*semaphore=*/AllocaSemaphore(),
-      /*add=*/false,
-      /*offset_filter=*/nullptr);
+      /*offset_filter=*/nullptr,
+      /*add=*/false);
 
   ASSERT_THAT(
       VerifyOp(dma),
@@ -629,6 +672,77 @@ TEST_F(TpuOpsVectorSubcoreVerificationTest,
                  "2 minormost dimensions of the source (scatter updates) shape "
                  "(8, 32, 128) must match the minormost dimensions of the "
                  "target (scatter operand) shape (1024, 96, 512)")));
+}
+
+TEST_F(TpuOpsVerificationTest, IndirectDmaWaitOnUnsupportedCoreInvalid) {
+  static constexpr std::array<CoreType, 2> unsupported_cores = {
+      CoreType::kScScalarSubcore, CoreType::kTc};
+  for (CoreType unsupported_core : unsupported_cores) {
+    SCOPED_TRACE(testing::Message()
+                 << "Testing unsupported core type: "
+                 << stringifyCoreType(unsupported_core).str());
+    auto func_op = Create<func::FuncOp>("scalar_kernel",
+                                        builder().getFunctionType({}, {}));
+    func_op->setAttr(
+        TPUDialect::GetCoreTypeKey(),
+        CoreTypeAttr::get(builder().getContext(), unsupported_core));
+    builder().setInsertionPointToStart(func_op.addEntryBlock());
+    auto wait = Create<WaitIndirectDMAOp>(
+        /*semaphore=*/AllocaSemaphore(),
+        /*src=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
+        /*dst=*/AllocaI32({64, 256, 128}, MemorySpace::kVmem));
+
+    ASSERT_THAT(VerifyOp(wait),
+                StatusIs(_, HasSubstr("Wait indirect DMA is supported only on "
+                                      "the SC vector subcore")));
+  }
+}
+
+TEST_F(TpuOpsVectorSubcoreVerificationTest,
+       IndirectDmaWaitGatherVerificationWorks) {
+  auto wait = Create<WaitIndirectDMAOp>(
+      /*semaphore=*/AllocaSemaphore(),
+      /*src=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
+      /*dst=*/AllocaI32({64, 256, 128}, MemorySpace::kVmem));
+
+  ASSERT_OK(VerifyOp(wait));
+}
+
+TEST_F(TpuOpsVectorSubcoreVerificationTest,
+       IndirectDmaWaitScatterVerificationWorks) {
+  auto wait = Create<WaitIndirectDMAOp>(
+      /*semaphore=*/AllocaSemaphore(),
+      /*source=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
+      /*target=*/AllocaI32({1024, 256, 128}, MemorySpace::kVmemShared));
+
+  ASSERT_OK(VerifyOp(wait));
+}
+
+TEST_F(TpuOpsVectorSubcoreVerificationTest,
+       IndirectDmaWaitWithoutLocalMemInvalid) {
+  auto wait = Create<WaitIndirectDMAOp>(
+      /*semaphore=*/AllocaSemaphore(),
+      /*src=*/AllocaI32({1024, 256, 128}, MemorySpace::kHbm),
+      /*dst=*/AllocaI32({64, 256, 128}, MemorySpace::kHbm));
+
+  ASSERT_THAT(VerifyOp(wait),
+              StatusIs(_, HasSubstr("The transfer must be between HBM and "
+                                    "VMEM, or between VMEM_SHARED and VMEM")));
+}
+
+TEST_F(TpuOpsVectorSubcoreVerificationTest,
+       IndirectDmaWaitInvalidSemaphoreRank) {
+  auto wait = Create<WaitIndirectDMAOp>(
+      /*semaphore=*/Create<tpu::AllocaSemaphoreOp>(
+          GetMemRefType({8}, SemaphoreType::get(builder().getContext()),
+                        MemorySpace::kSemaphoreMem))
+          .getResult(),
+      /*source=*/AllocaI32({64, 32, 128}, MemorySpace::kVmem),
+      /*target=*/AllocaI32({1024, 256, 128}, MemorySpace::kVmemShared));
+
+  ASSERT_THAT(
+      VerifyOp(wait),
+      StatusIs(_, HasSubstr("Indirect DMA wait semaphore must be rank 0")));
 }
 }  // namespace
 }  // namespace mlir::tpu

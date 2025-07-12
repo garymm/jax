@@ -27,9 +27,11 @@ import jax
 from jax import lax
 from jax._src import callback
 from jax._src import core as jax_core
+from jax._src import frozen_dict
 from jax._src.lax.control_flow import for_loop
 from jax._src import linear_util as lu
 from jax._src import source_info_util
+from jax._src.interpreters import mlir
 from jax._src.pallas.mosaic import core as mosaic_core
 from jax._src.pallas.mosaic import primitives as mosaic_primitives
 from jax._src.pallas.mosaic import verification
@@ -1511,7 +1513,7 @@ def _interpret_jaxpr(
       elif prim is for_loop.for_p:
         raise NotImplementedError('for_p')
 
-      elif prim is pjit.pjit_p:
+      elif prim is pjit.jit_p:
         def f(*args, jaxpr):
           return _interpret(jaxpr.jaxpr, *jaxpr.consts, *args)
         invals = deferred_invals()
@@ -1520,7 +1522,7 @@ def _interpret_jaxpr(
             lu.wrap_init(functools.partial(f, jaxpr=eqn.params['jaxpr']),
                         debug_info=eqn.params['jaxpr'].jaxpr.debug_info),
             in_avals)
-        out = pjit.pjit_p.bind(*invals, **(eqn.params | {'jaxpr': new_jaxpr}))
+        out = pjit.jit_p.bind(*invals, **(eqn.params | {'jaxpr': new_jaxpr}))
 
       elif prim is primitives.run_scoped_p:
         if eqn.params['collective_axes']:
@@ -1615,14 +1617,20 @@ def _interpret_jaxpr(
             target_device_id, eqn.params['device_id_type'], axis_sizes)
         (orig_src_ref, _, orig_dst_ref, *_
         ) = jax.tree.unflatten(eqn.params['tree'], eqn.invars)
+        src_memory_space = getattr(orig_src_ref.aval, 'memory_space', None)
+        if src_memory_space is None:
+          src_memory_space = mosaic_core.MemorySpace.ANY
+        dst_memory_space = getattr(orig_dst_ref.aval, 'memory_space', None)
+        if dst_memory_space is None:
+          dst_memory_space = mosaic_core.MemorySpace.ANY
         callback.io_callback(
             functools.partial(dma_start, source_info=eqn.source_info),
             (),
             device_id,
             local_core_id,
-            TPU_MEMORY_SPACE_IDXS[getattr(orig_src_ref.aval, 'memory_space', mosaic_core.MemorySpace.ANY)],
+            TPU_MEMORY_SPACE_IDXS[src_memory_space],
             src, src_transforms,
-            TPU_MEMORY_SPACE_IDXS[getattr(orig_dst_ref.aval, 'memory_space', mosaic_core.MemorySpace.ANY)],
+            TPU_MEMORY_SPACE_IDXS[dst_memory_space],
             dst, dst_transforms,
             state_discharge.transform_array(dst_sem, dst_sem_transforms),
             state_discharge.transform_array(src_sem, src_sem_transforms),
@@ -1873,6 +1881,30 @@ def _get_randomized_grid_coordinates(
 
   return tuple(grid_point_coordinates)
 
+# TODO(sharadmv, jburnim): add support for memory space constraints
+remove_memory_space_p = jax_core.Primitive('remove_memory_space')
+
+@remove_memory_space_p.def_abstract_eval
+def _remove_memory_space_abstract_eval(x):
+  if isinstance(x, pallas_core.ShapedArrayWithMemorySpace):
+    if (
+        x.memory_space is None
+        or x.memory_space is pallas_core.MemorySpace.ANY
+        or x.memory_space is mosaic_core.MemorySpace.ANY
+        or x.memory_space is mosaic_core.MemorySpace.HBM
+    ):
+      return jax_core.ShapedArray(x.shape, x.dtype)
+    raise NotImplementedError(f'Unsupported memory space: {x.memory_space}')
+  return x
+
+def _remove_memory_space_impl(x):
+  return x
+
+def _remove_memory_space_lowering(_, x):
+  return [x]
+mlir.register_lowering(remove_memory_space_p, _remove_memory_space_lowering)
+
+
 
 def _get_grid_point(
     loop_indices: tuple[Array, ...],
@@ -1998,8 +2030,10 @@ def interpret_pallas_call(
     cost_estimate: CostEstimate,
     out_avals: tuple[jax_core.AbstractValue, ...],
     interpret_params: InterpretParams,
+    metadata: frozen_dict.FrozenDict[str, str] | None,
 ):
   del debug, cost_estimate, out_avals
+  del metadata  # TODO(sharadmv): Add metadata to HLO.
 
   if isinstance(mesh, mosaic_core.TensorCoreMesh):
     # As a convenience for users, if we are interpreting a pl.core_map over a
@@ -2009,6 +2043,7 @@ def interpret_pallas_call(
     interpret_params = dataclasses.replace(
         interpret_params, num_cores_per_device=mesh.devices.shape[0])
 
+  args = [remove_memory_space_p.bind(a) for a in args]
   # args contains: *dynamic_grid_sizes, *index, *inputs.  (No consts?)
   dynamic_grid_args, scalars, input_args = split_list(
       args,

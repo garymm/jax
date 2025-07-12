@@ -43,7 +43,7 @@ ifrt_programs = _xla.ifrt_programs
 
 # Just an internal arbitrary increasing number to help with backward-compatible
 # changes. In JAX, reference this via jax._src.lib.jaxlib_extension_version.
-_version = 356
+_version = 362
 
 # An internal increasing version number for protecting jaxlib code against
 # ifrt changes.
@@ -190,6 +190,8 @@ def generate_pjrt_gpu_plugin_options() -> _NameValueMapping:
     options['preallocate'] = preallocate not in ('false', 'False', '0')
   if collective_memory_size:
     options['collective_memory_size'] = int(collective_memory_size) * (1 << 20)
+  abort = os.getenv('XLA_PYTHON_CLIENT_ABORT_COLLECTIVES_ON_FAILURE', '0')
+  options['abort_collectives_on_failure'] = bool(int(abort))
   return options
 
 
@@ -506,17 +508,6 @@ register_custom_call_as_batch_partitionable = (
 
 Traceback = _xla.Traceback
 Frame = _xla.Frame
-
-
-@contextlib.contextmanager
-def tracebacks(enabled=True):
-  """Context manager that enables or disables traceback collection."""
-  saved = _xla.tracebacks_enabled()
-  _xla.set_tracebacks_enabled(enabled)
-  try:
-    yield
-  finally:
-    _xla.set_tracebacks_enabled(saved)
 
 
 @contextlib.contextmanager

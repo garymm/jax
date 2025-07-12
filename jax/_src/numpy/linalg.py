@@ -24,6 +24,7 @@ from typing import Literal, NamedTuple, overload
 import numpy as np
 
 from jax._src import api
+from jax._src import core
 from jax._src import config
 from jax._src import deprecations
 from jax._src.custom_derivatives import custom_jvp
@@ -33,6 +34,7 @@ from jax._src.numpy import array_creation
 from jax._src.numpy import einsum
 from jax._src.numpy import indexing
 from jax._src.numpy import lax_numpy as jnp
+from jax._src.sharding_impls import NamedSharding, PartitionSpec as P
 from jax._src.numpy import reductions, tensor_contractions, ufuncs
 from jax._src.numpy.util import promote_dtypes_inexact, ensure_arraylike
 from jax._src.util import canonicalize_axis, set_module
@@ -1366,6 +1368,7 @@ def solve(a: ArrayLike, b: ArrayLike) -> Array:
       " To recover this behavior, use solve(a, b[..., None]).squeeze(-1).")
 
   signature = "(m,m),(m)->(m)" if b.ndim == 1 else "(m,m),(m,n)->(m,n)"
+  a, b = core.standard_insert_pvary(a, b)
   return jnp.vectorize(lax_linalg._solve, signature=signature)(a, b)
 
 
@@ -1802,7 +1805,8 @@ def matmul(x1: ArrayLike, x2: ArrayLike, /, *,
 def tensordot(x1: ArrayLike, x2: ArrayLike, /, *,
               axes: int | tuple[Sequence[int], Sequence[int]] = 2,
               precision: lax.PrecisionLike = None,
-              preferred_element_type: DTypeLike | None = None) -> Array:
+              preferred_element_type: DTypeLike | None = None,
+              out_sharding: NamedSharding | P | None = None) -> Array:
   """Compute the tensor dot product of two N-dimensional arrays.
 
   JAX implementation of :func:`numpy.linalg.tensordot`.
@@ -1876,8 +1880,9 @@ def tensordot(x1: ArrayLike, x2: ArrayLike, /, *,
            [2, 4, 6]], dtype=int32)
   """
   x1, x2 = ensure_arraylike('jnp.linalg.tensordot', x1, x2)
-  return tensor_contractions.tensordot(x1, x2, axes=axes, precision=precision,
-                                       preferred_element_type=preferred_element_type)
+  return tensor_contractions.tensordot(
+      x1, x2, axes=axes, precision=precision,
+      preferred_element_type=preferred_element_type, out_sharding=out_sharding)
 
 
 @export

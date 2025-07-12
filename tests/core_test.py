@@ -408,13 +408,13 @@ class CoreTest(jtu.JaxTestCase):
     self.assertEqual(x_repr, "VmapTracer<int32[]>")
 
     jax.grad(f)(jnp.float16(1.0))
-    self.assertEqual(x_repr, "GradTracer<float16[]>")
+    self.assertRegex(x_repr, r"(Grad)|(Linearize)Tracer<float16\[\]>")
 
     jax.jacrev(f)(jnp.arange(12, dtype='float32'))
-    self.assertEqual(x_repr, "GradTracer<float32[12]>")
+    self.assertRegex(x_repr, r"(Grad)|(Linearize)Tracer<float32\[12\]>")
 
     jax.jacfwd(f)(jnp.arange(14, dtype='float32'))
-    self.assertEqual(x_repr, "GradTracer<float32[14]>")
+    self.assertRegex(x_repr, r"(Grad)|(Linearize)Tracer<float32\[14\]>")
 
   def test_verbose_tracer_reprs(self):
     # Verbose reprs, avaiable via tracer._pretty_print()
@@ -431,7 +431,7 @@ class CoreTest(jtu.JaxTestCase):
     self.assertRegex(x_repr, r"^Traced<int32\[\]>with<BatchTrace>")
 
     jax.grad(f)(jnp.float16(1.0))
-    self.assertRegex(x_repr, r"^Traced<float16\[\]>with<JVPTrace>")
+    self.assertRegex(x_repr, r"^Traced<float16\[\]>with<(JVP)|(Linearize)Trace>")
 
 
 @jtu.with_config(jax_pprint_use_color=False)
@@ -441,13 +441,15 @@ class JaxprTypeChecks(jtu.JaxTestCase):
     super().setUp()
     lax_control_flow._initial_style_open_jaxpr.cache_clear()
     lax_control_flow._initial_style_jaxpr.cache_clear()
-    lax_control_flow.common._pad_jaxpr_constvars.cache_clear()
+    lax_control_flow.common._dedup_consts.cache_clear()
+    lax_control_flow.common._pad_constvars.cache_clear()
 
   def tearDown(self):
     super().tearDown()
     lax_control_flow._initial_style_open_jaxpr.cache_clear()
     lax_control_flow._initial_style_jaxpr.cache_clear()
-    lax_control_flow.common._pad_jaxpr_constvars.cache_clear()
+    lax_control_flow.common._dedup_consts.cache_clear()
+    lax_control_flow.common._pad_constvars.cache_clear()
 
   def test_check_jaxpr_correct(self):
     jaxpr = make_jaxpr(lambda x: jnp.sin(x) + jnp.cos(x))(1.).jaxpr
@@ -591,6 +593,7 @@ class JaxprTypeChecks(jtu.JaxTestCase):
     core.check_jaxpr(jaxpr)
 
 
+@unittest.skip("currently unmaintained")
 @jtu.with_config(jax_dynamic_shapes=True)
 class DynamicShapesTest(jtu.JaxTestCase):
 
@@ -602,7 +605,7 @@ class DynamicShapesTest(jtu.JaxTestCase):
     def f(x, y):
       return x, y
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(f,
                    debug_info=debug_info("test", f, (1, 2), {})),
       [n, a, b], keep_inputs=[False, True, True])
@@ -627,7 +630,7 @@ class DynamicShapesTest(jtu.JaxTestCase):
         return (x, w)
       return g(x, y, x, y)
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
       lu.wrap_init(f,
                    debug_info=debug_info("test", f, (0, 1), {})),
         [n, a, b], keep_inputs=[False, True, True])
@@ -664,7 +667,7 @@ class DynamicShapesTest(jtu.JaxTestCase):
         return (x, w)
       return g(x.shape[0], x, y, x, y)
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(f,
                      debug_info=debug_info("test", f, (1, 2), {})),
         [n, a, b], keep_inputs=[False, True, True])
@@ -701,7 +704,7 @@ class DynamicShapesTest(jtu.JaxTestCase):
       u = lax.reduce_sum(w, [0])
       return (u,)
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(f,
                      debug_info=debug_info("test", f, (1, 2), {})),
         [n, a, b], keep_inputs=[False, True, True])
@@ -727,7 +730,7 @@ class DynamicShapesTest(jtu.JaxTestCase):
       def g(x): return x
       return g(a),
 
-    jaxpr, _, _, () = pe.trace_to_jaxpr_dynamic(
+    jaxpr, _, _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(f,
                      debug_info=debug_info("test", f, (1, 2), {})),
         [n, m, a, b], keep_inputs=[False, False, True, True])

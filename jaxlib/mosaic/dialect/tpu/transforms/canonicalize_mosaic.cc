@@ -39,8 +39,8 @@ limitations under the License.
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Operation.h"
@@ -390,7 +390,7 @@ FailureOr<Value> canonicalize_elementwise(const CanonicalizeContext &ctx,
       if (element_type.isBF16()) {
         if (ctx.compatibility_mode) {
           auto target_f32 =
-              builder.create<arith::ExtFOp>(op.getLoc(), target_f32_ty, operand)
+              builder.create<tpu::ExtFOp>(op.getLoc(), target_f32_ty, operand)
                   .getResult();
           should_rewrite_op = true;
           new_operands.push_back(target_f32);
@@ -428,8 +428,9 @@ FailureOr<Value> canonicalize_elementwise(const CanonicalizeContext &ctx,
         builder.create(op.getLoc(), op.getName().getIdentifier(), new_operands,
                        new_res_ty, op.getAttrs());
     if (should_truncate) {
-      new_op = builder.create<arith::TruncFOp>(op.getLoc(), res_ty,
-                                               new_op->getResult(0));
+      new_op = builder.create<tpu::TruncFOp>(op.getLoc(), res_ty,
+                                             new_op->getResult(0),
+                                             tpu::RoundingMode::kToNearestEven);
     }
     op.replaceAllUsesWith(new_op);
     op.erase();
@@ -459,7 +460,7 @@ FailureOr<Value> canonicalize_multi_dim_reduction(
       }
     }
     if (ctx.hardware_generation <= 5) {
-      auto new_source = builder.create<arith::ExtFOp>(
+      auto new_source = builder.create<tpu::ExtFOp>(
           VectorType::get(source_ty.getShape(), builder.getF32Type()),
           op.getSource());
 
@@ -468,12 +469,12 @@ FailureOr<Value> canonicalize_multi_dim_reduction(
       // createOrFold does not trigger recursive canonicalization, but
       // extensions to f32 are always supported.
       Value new_acc =
-          builder.createOrFold<arith::ExtFOp>(result_ty_f32, op.getAcc());
+          builder.createOrFold<tpu::ExtFOp>(result_ty_f32, op.getAcc());
       auto new_op = builder.create<vector::MultiDimReductionOp>(
           op.getLoc(), new_acc.getType(), op.getKindAttr(), new_source, new_acc,
           DenseI64ArrayAttr::get(builder.getContext(), op.getReductionDims()));
-      auto new_result =
-          builder.create<arith::TruncFOp>(op.getLoc(), result_ty, new_op);
+      auto new_result = builder.create<tpu::TruncFOp>(
+          op.getLoc(), result_ty, new_op, tpu::RoundingMode::kToNearestEven);
       op.replaceAllUsesWith(new_result);
       op.erase();
       return new_result;
@@ -678,10 +679,10 @@ FailureOr<Value> canonicalize_fptosi(const CanonicalizeContext &ctx,
   // Upcast the input to f32.
   if (src_bitwidth < 32) {
     if (is_vector) {
-      x = builder.create<arith::ExtFOp>(
+      x = builder.create<tpu::ExtFOp>(
           VectorType::get(src_vty.getShape(), builder.getF32Type()), x);
     } else {
-      x = builder.create<arith::ExtFOp>(builder.getF32Type(), x);
+      x = builder.create<tpu::ExtFOp>(builder.getF32Type(), x);
     }
   }
   if (dst_bitwidth < 32) {
@@ -775,7 +776,8 @@ FailureOr<Value> canonicalize_sitofp(const CanonicalizeContext &ctx,
                                       tpu::RoundingMode::kToNearestEven);
   }
   if (dst_bitwidth < 32) {
-    x = builder.create<arith::TruncFOp>(op.getType(), x);
+    x = builder.create<tpu::TruncFOp>(op.getType(), x,
+                                      tpu::RoundingMode::kToNearestEven);
   }
   op.replaceAllUsesWith(x);
   op.erase();
@@ -817,193 +819,258 @@ FailureOr<Value> canonicalize_vector_transpose(const CanonicalizeContext &ctx,
   return new_op;
 }
 
+// Finds the split point for a reshape that collapses a suffix of dimensions.
+// For a reshape from src_shape to tgt_shape, identifies if the pattern is
+// (P..., S_1, S_2, ...) -> (P..., T_collapsed) where P is a common prefix and
+// product(S_i) == T_collapsed. Handles leading dimensions of size 1 of
+// different number of leading 1s.
+// Returns the index in src_shape where the collapsing suffix begins
+// and the sublane product of the src shape.
+std::optional<std::pair<int, int>> findCollapseSplitPoint(
+    ArrayRef<int64_t> src_shape, ArrayRef<int64_t> tgt_shape) {
+  int s = 0, t = 0;
+  // drop leading 1s
+  while (s < src_shape.size() && src_shape[s] == 1) {
+    ++s;
+  }
+  while (t < tgt_shape.size() && tgt_shape[t] == 1) {
+    ++t;
+  }
+
+  // Find the end of the common prefix between the shapes (ignoring leading 1s).
+  int s_prefix_end = s, t_prefix_end = t;
+  while (s_prefix_end < src_shape.size() && t_prefix_end < tgt_shape.size() &&
+         src_shape[s_prefix_end] == tgt_shape[t_prefix_end]) {
+    ++s_prefix_end;
+    ++t_prefix_end;
+  }
+
+  // After the common prefix, the rest of the target shape must consist of just
+  // one dimension (the collapsed one).
+  if (t_prefix_end != tgt_shape.size() - 1) {
+    return std::nullopt;
+  }
+  int64_t src_prod = 1;
+  for (int i = s_prefix_end; i < src_shape.size(); ++i) {
+    src_prod *= src_shape[i];
+  }
+
+  if (tgt_shape.back() != src_prod) {
+    return std::nullopt;
+  }
+  src_prod /= src_shape.back();
+  return std::make_pair(s_prefix_end, src_prod);
+}
+
 FailureOr<Value> canonicalize_reshape(const CanonicalizeContext &ctx,
                                       Operation &raw_op) {
+  // def fused_load_reshape(memref, indices):
+  //   # 1. Create a memref view for packed i32 loading.
+  //   # Original shape: <Prefix_mem..., S, Lane, ElemTy>
+  //   # New i32 view:   <Prefix_mem..., S/packing, Lane, i32>
+  //   i32_view = memref.reshape_and_bitcast(...)
+  //
+  //   # 2. Load i32 rows, unpack elements from each, and collect the chunks.
+  //   unpacked_chunks = []
+  //   for i in range(S / packing):
+  //     # Load a single row of packed data. This corresponds to a
+  //     # `StridedLoad` + `ShapeCast`. Result shape: <Prefix_vec..., Lane, i32>
+  //     i32_chunk = load_i32_row(i32_view, indices_prefix, i)
+  //
+  //     # Unpack `packing` smaller elements from each i32 in the chunk.
+  //     for p in range(packing):
+  //       unpacked_chunk = i32_chunk >> (p * bitwidth)
+  //       unpacked_chunks.append(unpacked_chunk)
+  //
+  //   # 3. Concatenate all resulting chunks into a single large vector.
+  //   # Result shape after concat: <Prefix_vec..., S*Lane, i32>
+  //   concatenated_i32 = np.concatenate(unpacked_chunks, axis=-1)
+  //
+  //   # 4. Truncate/bitcast the i32 vector to the final target type.
+  //   return concatenated_i32.trunc().bitcast(final_element_type)
   auto op = cast<vector::ShapeCastOp>(raw_op);
-  auto src = op.getSource();
-  auto src_ty = src.getType();
-  auto tgt_ty = op.getType();
+  Value src = op.getSource();
+  auto tgt_ty = op.getResult().getType();
 
-  vector::LoadOp load_op;
-  auto cur_traversal_val = src;
-  // This goes back up 5 levels of shape casts, this is because real world cases
-  // can look like load->reshape->reshape.
-  for (int i = 0; i < 5; ++i) {
-    auto defining_op = cur_traversal_val.getDefiningOp();
-    if (!defining_op) break;
-    if (auto load = dyn_cast<vector::LoadOp>(defining_op)) {
-      load_op = load;
-      break;
-    }
-    if (auto shape_cast = dyn_cast<vector::ShapeCastOp>(defining_op)) {
-      cur_traversal_val = shape_cast.getSource();
-    } else {
-      break;
+  auto load_op = dyn_cast_if_present<vector::LoadOp>(src.getDefiningOp());
+  if (!load_op) {
+    return raw_op.getResult(0);
+  }
+  // This rewrite is only safe if the load has one user (this shape_cast).
+  if (!load_op.getResult().hasOneUse()) {
+    return raw_op.getResult(0);
+  }
+
+  auto src_ty = cast<VectorType>(load_op.getResult().getType());
+  auto ref = load_op.getBase();
+  auto memref_ty = ref.getType();
+  if (!isContiguousMemref(ref)) {
+    return raw_op.getResult(0);
+  }
+
+  const int64_t sublane = ctx.target_shape[0];
+  const int64_t lane = ctx.target_shape[1];
+  // Check if we are collapsing the lanes.
+  if (tgt_ty.getShape().back() == lane) {
+    return raw_op.getResult(0);
+  }
+  // This pattern is for collapse only, not expand.
+  if (src_ty.getRank() < tgt_ty.getRank()) {
+    return raw_op.getResult(0);
+  }
+
+  auto split_opt = findCollapseSplitPoint(src_ty.getShape(), tgt_ty.getShape());
+  if (!split_opt) {
+    return raw_op.getResult(0);
+  }
+  auto [split_point, sublane_prod] = *split_opt;
+  if (split_point == 0) {
+    // This is a 1d case
+    return raw_op.getResult(0);
+  }
+
+  auto memref_shape = cast<MemRefType>(memref_ty).getShape();
+  auto src_ty_shape = src_ty.getShape();
+  auto mem_rank = memref_shape.size();
+  auto vec_rank = src_ty_shape.size();
+  if (mem_rank < 2 || vec_rank < 2) {
+    // This is a 1d case
+    return raw_op.getResult(0);
+  }
+
+  if (memref_shape[mem_rank - 1] != src_ty_shape[vec_rank - 1] ||
+      memref_shape[mem_rank - 2] != src_ty_shape[vec_rank - 2]) {
+    // This indicates slicing in the 2nd minor or minor.
+    return raw_op.getResult(0);
+  }
+
+  int bitwidth = src_ty.getElementTypeBitWidth();
+  int packing = 32 / bitwidth;
+  if (ctx.hardware_generation < 4 && packing > 1) {
+    return raw_op.getResult(0);
+  }
+  if (sublane_prod == 0 || sublane_prod % packing != 0) {
+    return raw_op.getResult(0);
+  }
+  // We only support cases where we fill a full vreg.
+  auto tgt_sublane = *(tgt_ty.getShape().end() - 2);
+  auto tgt_lane = *(tgt_ty.getShape().end() - 1);
+  if (tgt_sublane % (sublane * packing) != 0) {
+    if (tgt_lane % lane != 0) {
+      return raw_op.getResult(0);
     }
   }
 
-  if (load_op) {
-    // Pattern match (..., M, N, 128) -> (..., M, N * 128).
-    // This reshape can be folded into the load for any dtype and tiling
-    // as long as the minormost dim is 128 and N is aligned to packing. The
-    // pseudo code is:
-    // ```
-    // src_ref: (M, N, 128) with src_ty
-    //
-    // def load_to_reshape(src_ref):
-    //   b_ref = src_ref.bitcast(i32) # i32[M, N / packing, 128]
-    //   r_ref = b_ref.reshape(M * N / packing, 128)
-    //   chunks = []
-    //   for i in range(N / packing):
-    //     v = r_ref[i::N / packing, :] # i32[M, 128]
-    //     for j in range(packing):
-    //       chunk = v >> (j * bitwidth)
-    //       chunks.append(chunk)
-    //   res = concat(chunks, axis=-1) # i32[M, N * 128]
-    //   # int_src_ty refers to int type with the same bitwidth as src_ty.
-    //   res = res.astype(int_src_ty) # Trigger i32 -> int_src_ty packing.
-    //   return bitcast(res, src_ty) # src_ty[M, N * 128]
-    // ```
-    // TODO(jevinjiang): we can extend this to support folding more dims to last
-    // dim not just last 2 dims.
-    VectorType load_result_ty = load_op.getType();
+  auto indices = load_op.getIndices();
 
-    auto bitwidth = load_result_ty.getElementTypeBitWidth();
-    auto packing = 32 / bitwidth;
-    if (packing <= 0) {
-      return op.emitOpError("Unsupported bitwidth = ") << bitwidth;
-    }
-    // Memref bitcast is not supported if HW generation is below 4. We don't
-    // return failure because we will rely on vector reshape.
-    if (ctx.hardware_generation < 4 && packing > 1) {
-      return raw_op.getResult(0);
-    }
-    auto ref = load_op.getBase();
-    auto indices = load_op.getIndices();
-    auto ref_shape = ref.getType().getShape();
-    auto src_shape = src_ty.getShape();
-    auto tgt_shape = tgt_ty.getShape();
-    int ref_rank = ref_shape.size();
-    int src_rank = src_shape.size();
-    int tgt_rank = tgt_shape.size();
+  // Distinguish between the memref's prefix and the (potentially sliced)
+  // vector's prefix.
+  SmallVector<int64_t> mem_shape(memref_ty.getShape().begin(),
+                                 memref_ty.getShape().begin() + split_point);
+  SmallVector<int64_t> vec_shape(src_ty.getShape().begin(),
+                                 src_ty.getShape().begin() + split_point);
 
-    if (ref_rank != load_result_ty.getRank()) {
-      return op.emitOpError("Loaded vector rank and memref rank mismatch");
-    }
-    if (!isContiguousMemref(ref) || ref_rank <= 2 ||
-        // TODO(jevinjiang, mvoz): add support for partial load on last 2 dims
-        // where last 2 indices are not necessarily 0 or load shape is not full.
-        getIntConst(indices[ref_rank - 1]) != 0 ||
-        getIntConst(indices[ref_rank - 2]) != 0 ||
-        ref_shape[ref_rank - 1] != load_result_ty.getShape()[ref_rank - 1] ||
-        ref_shape[ref_rank - 2] != load_result_ty.getShape()[ref_rank - 2]) {
-      return raw_op.getResult(0);
-    }
+  CanonicalBuilder b(ctx, op->getLoc(), op.getOperation());
+  auto loc = op.getLoc();
+  auto i32_type = b.getI32Type();
 
-    if (src_shape[src_rank - 2] % packing != 0 ||
-        src_shape[src_rank - 1] != ctx.target_shape[1] ||
-        src_shape[src_rank - 2] * src_shape[src_rank - 1] !=
-            tgt_shape[tgt_rank - 1]) {
-      return raw_op.getResult(0);
-    }
-    // At this point, the pattern is matched.
-    CanonicalBuilder builder(ctx, op->getLoc(), op.getOperation());
-    auto loc = op.getLoc();
-    // First, we bitcast and reshape src ref from (..., M, N, 128) to
-    // i32(..., M * N / packing, 128).
-    SmallVector<int64_t> bitcast_shape(ref_shape);
-    // TODO(jevinjiang): once we have memref pad op, we can use ceiling
-    // division to ref_shape[ref_rank - 2] and packing to get sublane_cnt.
-    CHECK_EQ(ref_shape[ref_rank - 2] % packing, 0);
-    auto i32_2nd_minor_size = ref_shape[ref_rank - 2] / packing;
-    bitcast_shape[ref_rank - 2] = i32_2nd_minor_size;
-    auto i32_ref = builder.create<tpu::MemRefBitcastOp>(
-        MemRefType::get(bitcast_shape, builder.getI32Type()), ref);
-
-    auto i32_ref_shape = cast<MemRefType>(i32_ref.getType()).getShape();
-    SmallVector<int64_t> reshape_shape(i32_ref_shape.begin(),
-                                       i32_ref_shape.begin() + ref_rank - 3);
-    reshape_shape.push_back(i32_ref_shape[ref_rank - 3] * i32_2nd_minor_size);
-    reshape_shape.push_back(i32_ref_shape[ref_rank - 1]);
-    auto reshape_ref = builder.create<tpu::MemRefReshapeOp>(
-        MemRefType::get(reshape_shape, builder.getI32Type()), i32_ref);
-
-    // Then, we strided load the bitcasted ref by stride (N / packing).
-    int stride = i32_2nd_minor_size;
-    // Expect to hold src_shape[src_rank - 2] number of chunks which have the
-    // shape (..., src_shape[src_rank - 3], 128) and wait to be concatenated
-    // along the last dim.
-    SmallVector<Value> chunks(src_shape[src_rank - 2]);
-
-    SmallVector<int64_t> chunk_shape(load_result_ty.getShape());
-    chunk_shape.pop_back();
-    chunk_shape.back() = ctx.target_shape[1];
-
-    SmallVector<int32_t> strides(reshape_shape.size(), 1);
-    strides[reshape_shape.size() - 2] = stride;
-    int num_prefix_dims = ref_rank - 3;
-    Value m_idx_base_offset = builder.create<arith::MulIOp>(
-        builder.getIndexType(), indices[num_prefix_dims],
-        IdxConst(stride, builder, loc));
-
-    SmallVector<Value> current_load_indices;
-    for (int j = 0; j < num_prefix_dims; ++j) {
-      current_load_indices.push_back(indices[j]);
-    }
-    // This will be replaced by the collapsed dim idx.
-    current_load_indices.push_back(0);
-    current_load_indices.push_back(IdxConst(0, builder, loc));
-    for (int i = 0; i < stride; ++i) {
-      Value collapsed_dim_idx = builder.create<arith::AddIOp>(
-          builder.getIndexType(), m_idx_base_offset, IdxConst(i, builder, loc));
-      current_load_indices[reshape_shape.size() - 2] = collapsed_dim_idx;
-
-      auto chunk = builder.create<tpu::StridedLoadOp>(
-          VectorType::get(chunk_shape, builder.getI32Type()), reshape_ref,
-          current_load_indices, strides);
-      for (int j = 0; j < packing; ++j) {
-        int idx = i * packing + j;
-        chunks[idx] = builder.create<arith::ShRUIOp>(
-            chunk.getType(), chunk,
-            I32Const(j * bitwidth, chunk_shape, builder, loc));
-      }
-    }
-
-    CHECK_GT(chunks.size(), 0);
-    Value i32_tgt;
-    if (chunks.size() > 1) {
-      SmallVector<int64_t> i32_concat_shape(chunk_shape);
-      int concat_dim = chunk_shape.size() - 1;
-      i32_concat_shape[concat_dim] = tgt_shape.back();
-
-      i32_tgt = builder.create<tpu::ConcatenateOp>(
-          VectorType::get(i32_concat_shape, builder.getI32Type()), chunks,
-          concat_dim);
-    } else {
-      i32_tgt = chunks[0];
-    }
-
-    Value tgt = i32_tgt;
-    if (packing > 1) {
-      tgt = builder.create<arith::TruncIOp>(
-          VectorType::get(cast<VectorType>(i32_tgt.getType()).getShape(),
-                          builder.getIntegerType(bitwidth)),
-          i32_tgt);
-    }
-
-    auto intermed_ty = VectorType::get(
-        cast<VectorType>(tgt.getType()).getShape(), tgt_ty.getElementType());
-    tgt = builder.create<arith::BitcastOp>(intermed_ty, tgt);
-
-    if (tgt.getType() != tgt_ty) {
-      tgt = builder.create<vector::ShapeCastOp>(tgt_ty, tgt);
-    }
-
-    op.replaceAllUsesWith(tgt);
-    op.erase();
-    return tgt;
+  // Create a new memref view that matches the dimensions being collapsed.
+  mem_shape.push_back(sublane_prod);
+  mem_shape.push_back(lane);
+  auto mem_shape_prod = 1;
+  for (int i = 0; i < mem_shape.size(); ++i) {
+    mem_shape_prod *= mem_shape[i];
   }
-  return raw_op.getResult(0);
+  auto ref_prod = 1;
+  for (int i = 0; i < ref.getType().getShape().size(); ++i) {
+    ref_prod *= ref.getType().getShape()[i];
+  }
+  if (mem_shape_prod != ref_prod) {
+    // In certain cases, upstream padding may change the memref shape,
+    // which makes the intermediary memref reshape we rely on not sound.
+    // ex: 13 in sublanes will get padded to 16 in sublanes for bf16.
+    return raw_op.getResult(0);
+  }
+  Value reshaped_ref = b.create<tpu::MemRefReshapeOp>(
+      MemRefType::get(mem_shape, memref_ty.getElementType()), ref);
+
+  // Bitcast this view to i32 for packed loading.
+  int64_t num_i32_rows = sublane_prod / packing;
+  *(mem_shape.end() - 2) = num_i32_rows;
+  Value i32_view = b.create<tpu::MemRefBitcastOp>(
+      MemRefType::get(mem_shape, i32_type), reshaped_ref);
+
+  // Define the shape of the small i32 chunk we will load in each iteration.
+  SmallVector<int64_t> chunk_shape = vec_shape;
+  chunk_shape.push_back(1);
+  chunk_shape.push_back(lane);
+  auto chunk_ty = VectorType::get(chunk_shape, i32_type);
+
+  // Set up strides for tpu.StridedLoadOp. We only stride along the dimension
+  // we're iterating over.
+  int stride_dim = split_point;
+  SmallVector<int32_t> strides(mem_shape.size(), 1);
+  strides[stride_dim] = num_i32_rows;
+
+  // Loop to load, unpack, and collect all vector chunks.
+  SmallVector<Value> unpacked_chunks;
+  unpacked_chunks.reserve(sublane_prod);
+
+  // Reuse indices from the original load for the prefix.
+  SmallVector<Value> idxs(indices.begin(), indices.begin() + split_point);
+  // Dummy
+  idxs.push_back(nullptr);
+  idxs.push_back(IdxConst(0, b, loc));
+
+  // Collapse the '1' second minor dimension from the loaded chunk.
+  SmallVector<int64_t> collapsed_shape = vec_shape;
+  collapsed_shape.push_back(lane);
+  for (int i = 0; i < num_i32_rows; ++i) {
+    idxs[stride_dim] = IdxConst(i, b, loc);
+    Value slice =
+        b.create<tpu::StridedLoadOp>(chunk_ty, i32_view, idxs, strides);
+
+    Value collapsed = b.create<vector::ShapeCastOp>(
+        VectorType::get(collapsed_shape, i32_type), slice);
+
+    // Unpack elements from i32 if necessary.
+    for (int p = 0; p < packing; ++p) {
+      unpacked_chunks.push_back(b.create<arith::ShRUIOp>(
+          collapsed.getType(), collapsed,
+          I32Const(p * bitwidth, collapsed_shape, b, loc)));
+    }
+  }
+
+  Value i32_flat;
+  if (unpacked_chunks.size() == 1) {
+    i32_flat = unpacked_chunks.front();
+  } else {
+    SmallVector<int64_t> concat_shape = vec_shape;
+    concat_shape.push_back(lane * sublane_prod);
+    int concat_dim = concat_shape.size() - 1;
+    i32_flat = b.create<tpu::ConcatenateOp>(
+        VectorType::get(concat_shape, i32_type), unpacked_chunks, concat_dim);
+  }
+
+  // Convert the final i32 vector back to the target type.
+  Value final_vec = i32_flat;
+  if (packing > 1) {
+    final_vec = b.create<arith::TruncIOp>(
+        VectorType::get(cast<VectorType>(i32_flat.getType()).getShape(),
+                        b.getIntegerType(bitwidth)),
+        i32_flat);
+  }
+  final_vec = b.create<arith::BitcastOp>(
+      VectorType::get(cast<VectorType>(final_vec.getType()).getShape(),
+                      tgt_ty.getElementType()),
+      final_vec);
+  if (final_vec.getType() != tgt_ty) {
+    final_vec = b.create<vector::ShapeCastOp>(tgt_ty, final_vec);
+  }
+
+  op.replaceAllUsesWith(final_vec);
+  op.erase();
+  return final_vec;
 }
 
 // TODO(apaszke): Implement canonicalization for extf and truncf and use them
@@ -1025,10 +1092,11 @@ FailureOr<Value> canonicalize_transpose(const CanonicalizeContext &ctx,
       val_bf16 =
           builder.create<arith::SIToFPOp>(input_vty_bf16, op.getOperand());
     } else {
-      auto val_f32 = builder.create<arith::ExtFOp>(
+      auto val_f32 = builder.create<tpu::ExtFOp>(
           VectorType::get(input_vty.getShape(), builder.getF32Type()),
           op.getOperand());
-      val_bf16 = builder.create<arith::TruncFOp>(input_vty_bf16, val_f32);
+      val_bf16 = builder.create<tpu::TruncFOp>(
+          input_vty_bf16, val_f32, tpu::RoundingMode::kToNearestEven);
     }
 
     Value transposed_bf16 = builder.create<tpu::TransposeOp>(
@@ -1040,16 +1108,120 @@ FailureOr<Value> canonicalize_transpose(const CanonicalizeContext &ctx,
       new_result =
           builder.create<arith::FPToSIOp>(op.getType(), transposed_bf16);
     } else {
-      auto transposed_f32 = builder.create<arith::ExtFOp>(
+      auto transposed_f32 = builder.create<tpu::ExtFOp>(
           VectorType::get(output_vty.getShape(), builder.getF32Type()),
           transposed_bf16);
-      new_result = builder.create<arith::TruncFOp>(output_vty, transposed_f32);
+      new_result = builder.create<tpu::TruncFOp>(
+          output_vty, transposed_f32, tpu::RoundingMode::kToNearestEven);
     }
     op.replaceAllUsesWith(new_result);
     op.erase();
     return new_result;
   }
   return raw_op.getResult(0);
+}
+
+FailureOr<Value> canonicalize_arith_extf(const CanonicalizeContext &ctx,
+                                         Operation &raw_op) {
+  auto op = cast<arith::ExtFOp>(raw_op);
+  CanonicalBuilder builder(ctx, op->getLoc(), op.getOperation());
+  // Canonicalize arith::ExtFOp to tpu::ExtFOp.
+  auto new_result = builder.create<tpu::ExtFOp>(op.getType(), op.getOperand());
+  op.replaceAllUsesWith(new_result);
+  op.erase();
+  return new_result;
+}
+
+FailureOr<Value> canonicalize_tpu_extf(const CanonicalizeContext &ctx,
+                                       Operation &raw_op) {
+  auto op = cast<tpu::ExtFOp>(raw_op);
+  auto dst_ty = dyn_cast<VectorType>(op.getType());
+  if (!dst_ty) {
+    return raw_op.getResult(0);
+  }
+
+  auto src_ty = cast<VectorType>(op.getOperand().getType());
+  auto dst_elem_ty = dst_ty.getElementType();
+  auto src_elem_ty = src_ty.getElementType();
+  if (dst_elem_ty.isF32()) {
+    // Cast to f32 is always supported.
+    return raw_op.getResult(0);
+  }
+
+  if (dst_elem_ty.isBF16() &&
+      isa<Float8E5M2Type, Float8E4M3FNType>(src_elem_ty) &&
+      ctx.hardware_generation >= 7) {
+    // We have low-level optimized code for f8e4m3fn and f8e5m2 -> bf16 casts on
+    // TPU7x+.
+    return raw_op.getResult(0);
+  }
+
+  if (!ctx.compatibility_mode) {
+    return op.emitOpError(
+        "Enable compatibility mode to support extension to non-f32.");
+  }
+
+  CanonicalBuilder builder(ctx, op->getLoc(), op.getOperation());
+  // Otherwise, cast to f32 and then truncate.
+  VectorType f32_ty = VectorType::get(src_ty.getShape(), builder.getF32Type());
+  Value val_f32 = builder.create<tpu::ExtFOp>(f32_ty, op.getOperand());
+  auto new_result = builder.create<tpu::TruncFOp>(
+      dst_ty, val_f32, tpu::RoundingMode::kToNearestEven);
+  op.replaceAllUsesWith(new_result);
+  op.erase();
+  return new_result;
+}
+
+FailureOr<Value> canonicalize_arith_truncf(const CanonicalizeContext &ctx,
+                                           Operation &raw_op) {
+  auto op = cast<arith::TruncFOp>(raw_op);
+  CanonicalBuilder builder(ctx, op->getLoc(), op.getOperation());
+  // Canonicalize arith::TruncFOp to tpu::TruncFOp.
+  auto new_result = builder.create<tpu::TruncFOp>(
+      op.getType(), op.getOperand(), tpu::RoundingMode::kToNearestEven);
+  op.replaceAllUsesWith(new_result);
+  op.erase();
+  return new_result;
+}
+
+FailureOr<Value> canonicalize_tpu_truncf(const CanonicalizeContext &ctx,
+                                         Operation &raw_op) {
+  auto op = cast<tpu::TruncFOp>(raw_op);
+  auto src_ty = dyn_cast<VectorType>(op.getOperand().getType());
+  if (!src_ty) {
+    return raw_op.getResult(0);
+  }
+
+  auto dst_ty = cast<VectorType>(op.getType());
+  auto src_elem_ty = src_ty.getElementType();
+  auto dst_elem_ty = dst_ty.getElementType();
+  if (src_elem_ty.isF32()) {
+    // Truncate from f32 is always supported.
+    return raw_op.getResult(0);
+  }
+
+  if (src_elem_ty.isBF16() &&
+      isa<Float8E5M2Type, Float8E4M3FNType>(dst_elem_ty) &&
+      ctx.hardware_generation >= 7) {
+    // We have low-level optimized code for bf16 -> f8e4m3fn and f8e5m2 casts on
+    // TPU7x+.
+    return raw_op.getResult(0);
+  }
+
+  if (!ctx.compatibility_mode) {
+    return op.emitOpError(
+        "Enable compatibility mode to support truncation from non-f32.");
+  }
+
+  CanonicalBuilder builder(ctx, op->getLoc(), op.getOperation());
+  // Otherwise, cast to f32 and then truncate.
+  VectorType f32_ty = VectorType::get(src_ty.getShape(), builder.getF32Type());
+  Value val_f32 = builder.create<tpu::ExtFOp>(f32_ty, op.getOperand());
+  auto new_result = builder.create<tpu::TruncFOp>(
+      dst_ty, val_f32, tpu::RoundingMode::kToNearestEven);
+  op.replaceAllUsesWith(new_result);
+  op.erase();
+  return new_result;
 }
 
 const llvm::StringMap<canonicalize_rule_type> &rules() {
@@ -1065,6 +1237,10 @@ const llvm::StringMap<canonicalize_rule_type> &rules() {
       {arith::SelectOp::getOperationName(), canonicalize_select},
       {arith::FPToSIOp::getOperationName(), canonicalize_fptosi},
       {arith::SIToFPOp::getOperationName(), canonicalize_sitofp},
+      {arith::TruncFOp::getOperationName(), canonicalize_arith_truncf},
+      {arith::ExtFOp::getOperationName(), canonicalize_arith_extf},
+      {tpu::TruncFOp::getOperationName(), canonicalize_tpu_truncf},
+      {tpu::ExtFOp::getOperationName(), canonicalize_tpu_extf},
       {tpu::TransposeOp::getOperationName(), canonicalize_transpose},
       {tpu::RepeatOp::getOperationName(), canonicalize_repeat}};
   return *rules;
