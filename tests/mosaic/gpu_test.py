@@ -667,21 +667,21 @@ class WGMMALayoutTest(TestCase):
           (jnp.int4, jnp.int8),
           # TODO(apaszke,bchetioui): bf16/f32 -> f8e4m3fn
       ),
-      layout_desc=(
-          "WGMMA_LAYOUT",
-          "WGMMA_LAYOUT_8BIT",
-          "WGMMA_LAYOUT_UPCAST_2X",
-          "WGMMA_LAYOUT_UPCAST_4X",
+      layout_descs=(
+          ("WGMMA_LAYOUT", "WGMMA_LAYOUT"),
+          ("WGMMA_LAYOUT_8BIT", "WGMMA_LAYOUT_8BIT"),
+          ("WGMMA_LAYOUT_UPCAST_2X", "WGMMA_LAYOUT_UPCAST_2X"),
+          ("WGMMA_LAYOUT_UPCAST_2X", "WGMMA_LAYOUT"),
+          ("WGMMA_LAYOUT_UPCAST_4X", "WGMMA_LAYOUT_UPCAST_4X"),
+          ("WGMMA_LAYOUT_UPCAST_4X", "WGMMA_LAYOUT_UPCAST_2X"),
+          ("WGMMA_LAYOUT_UPCAST_4X", "WGMMA_LAYOUT"),
       ),
-      change_layout=(False, True),
   )
   @jtu.skip_if_mosaic_gpu_exceeds_shared_memory(device_patterns="RTX PRO 6000 Blackwell")
-  def test_optimized_conversion(self, jax_dtype_from_to, layout_desc, change_layout):
-    if change_layout and layout_desc == "WGMMA_LAYOUT":
-      self.skipTest("No-op relayout")
-    if change_layout and layout_desc == "WGMMA_LAYOUT_8BIT":
-      self.skipTest("Unimplemented relayout")
-    layout: fa.TiledLayout = getattr(fa, layout_desc)
+  def test_optimized_conversion(self, jax_dtype_from_to, layout_descs):
+    layout_desc_from, layout_desc_to = layout_descs
+    layout_from: fa.TiledLayout = getattr(fa, layout_desc_from)
+    layout_to: fa.TiledLayout = getattr(fa, layout_desc_to)
     jax_dtype_from, jax_dtype_to = jax_dtype_from_to
     mlir_dtype_from = utils.dtype_to_ir_type(jax_dtype_from)
     mlir_dtype_to = utils.dtype_to_ir_type(jax_dtype_to)
@@ -692,16 +692,16 @@ class WGMMALayoutTest(TestCase):
       t = mgpu.FragmentedArray.load_untiled(
           inp,
           is_signed=utils.is_signed(jax_dtype_from),
-          layout=layout,
+          layout=layout_from,
           optimized=False,
       )
-      if change_layout:
+      if layout_from != layout_to:
         if (
-            layout == fa.WGMMA_LAYOUT_UPCAST_4X
-            and utils.bitwidth(mlir_dtype_from) > 4
+            layout_from == fa.WGMMA_LAYOUT_UPCAST_4X
+            and utils.bitwidth(mlir_dtype_from) != 4
         ):
           self.skipTest("Unimplemented relayout")
-        t = t.to_layout(fa.WGMMA_LAYOUT)
+        t = t.to_layout(layout_to)
       t = t.astype(mlir_dtype_to, is_signed=utils.is_signed(jax_dtype_to))
       t.store_untiled(out, optimized=False)
 
@@ -725,7 +725,7 @@ class WGMMALayoutTest(TestCase):
       with open(file_path, "a") as f:
         data = (
             jnp.dtype(jax_dtype_from).name, jnp.dtype(jax_dtype_to).name,
-            layout_desc, change_layout, sass().count("\n"),
+            layout_desc_from, layout_desc_to, sass().count("\n")
         )
         f.write(",".join(map(str, data)) + "\n")
         f.flush()
@@ -1300,7 +1300,7 @@ class TCGen05Test(TestCase):
     n_instr_size = kwargs["n"] * in_bytewidth // n_steps
     if n_instr_size < swizzle or n_instr_size % swizzle != 0:
       self.skipTest("swizzle doesn't work with this instruction size")
-    if dtypes.bit_width(kwargs["in_jax_dtype"]) <= 8 and kwargs["n"] == swizzle:
+    if dtypes.itemsize_bits(kwargs["in_jax_dtype"]) <= 8 and kwargs["n"] == swizzle:
       self.skipTest("Only 8-bit and larger inputs are supported for MMA")
     self._basic_mma_test(
         **kwargs,
@@ -1328,7 +1328,7 @@ class TCGen05Test(TestCase):
     n_instr_size = kwargs["n"] * in_bytewidth // n_steps
     if n_instr_size < swizzle or n_instr_size % swizzle != 0:
       self.skipTest("swizzle doesn't work with this instruction size")
-    if dtypes.bit_width(kwargs["in_jax_dtype"]) <= 8 and kwargs["n"] == swizzle:
+    if dtypes.itemsize_bits(kwargs["in_jax_dtype"]) <= 8 and kwargs["n"] == swizzle:
       self.skipTest("Only 8-bit and larger inputs are supported for MMA")
     self._basic_mma_test(
         **kwargs,
@@ -1617,14 +1617,24 @@ class TCGen05Test(TestCase):
 
   @parameterized.product(
       in_jax_dtype=(jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float4_e2m1fn),
+      scale_jax_dtype=(jnp.float8_e8m0fnu, jnp.float8_e4m3fn),
       m=(128,),  # TODO(apaszke): 256
       n=(128, 256),  # TODO(apaszke): 192, other non-power-of-2
+      swizzle=(32, 128),
   )
-  def test_mma_block_scaled(self, m, n, in_jax_dtype):
+  def test_mma_block_scaled(self, m, n, in_jax_dtype, scale_jax_dtype, swizzle):
     out_jax_dtype = jnp.float32
-    scale_jax_dtype = jnp.float8_e8m0fnu
-    swizzle = 128
-    k_steps = 2
+    # When swizzle is small, we need to take many steps to make it large enough
+    # to make the scale count a multiple of 4.
+    k_steps = 4 if swizzle == 32 else 2
+    if scale_jax_dtype == jnp.float8_e8m0fnu:
+      block_size = 32
+    elif scale_jax_dtype == jnp.float8_e4m3fn:
+      if in_jax_dtype != jnp.float4_e2m1fn:
+        self.skipTest("Only float4_e2m1fn input is supported for e4m3fn scale.")
+      block_size = 16
+    else:
+      raise ValueError(f"Unsupported scale dtype: {scale_jax_dtype}")
     if out_jax_dtype == jnp.float16 and in_jax_dtype != jnp.float16:
       self.skipTest("Only f16 input is supported for f16 output.")
 
@@ -1670,21 +1680,37 @@ class TCGen05Test(TestCase):
     scratch_shape = [
         jax.ShapeDtypeStruct(tile_shape(x_shape, lhs_tiling), in_jax_dtype),
         jax.ShapeDtypeStruct(tile_shape(y_shape, rhs_tiling), in_jax_dtype),
-        jax.ShapeDtypeStruct((m // 128, k // (32 * 4), 32, 16), scale_jax_dtype),
-        jax.ShapeDtypeStruct((n // 128, k // (32 * 4), 32, 16), scale_jax_dtype),
+        jax.ShapeDtypeStruct((m // 128, k // (block_size * 4), 32, 16), scale_jax_dtype),
+        jax.ShapeDtypeStruct((n // 128, k // (block_size * 4), 32, 16), scale_jax_dtype),
         mgpu.TMABarrier(4),
         mgpu.Barrier(1),
         mgpu.TMEM((m, n), out_jax_dtype),
-        mgpu.TMEM((m, k // 32), scale_jax_dtype, layout=tcgen05.scales_layout()),
-        mgpu.TMEM((n, k // 32), scale_jax_dtype, layout=tcgen05.scales_layout()),
+        mgpu.TMEM((m, k // block_size), scale_jax_dtype, layout=tcgen05.scales_layout()),
+        mgpu.TMEM((n, k // block_size), scale_jax_dtype, layout=tcgen05.scales_layout()),
     ]
     ka, kb = jax.random.split(jax.random.key(1234), 2)
-    a_scales = jax.lax.bitcast_convert_type(
-        jax.random.randint(ka, (m, k // 32), 122, 132, dtype=jnp.uint8), scale_jax_dtype
-    )
-    b_scales = jax.lax.bitcast_convert_type(
-        jax.random.randint(kb, (n, k // 32), 122, 132, dtype=jnp.uint8), scale_jax_dtype
-    )
+    if scale_jax_dtype == jnp.float8_e8m0fnu:
+      a_scales = jax.lax.bitcast_convert_type(
+          jax.random.randint(ka, (m, k // block_size), 122, 132, dtype=jnp.uint8),
+          scale_jax_dtype
+      )
+      b_scales = jax.lax.bitcast_convert_type(
+          jax.random.randint(kb, (n, k // block_size), 122, 132, dtype=jnp.uint8),
+          scale_jax_dtype
+      )
+    elif scale_jax_dtype == jnp.float8_e4m3fn:
+      a_scales = jnp.abs(
+          jax.random.normal(ka, (m, k // block_size), dtype=jnp.float32).astype(
+              scale_jax_dtype
+          )
+      )
+      b_scales = jnp.abs(
+          jax.random.normal(kb, (n, k // block_size), dtype=jnp.float32).astype(
+              scale_jax_dtype
+          )
+      )
+    else:
+      raise ValueError(f"Unsupported scale dtype: {scale_jax_dtype}")
     def format_scales(scales):
       mn, k = scales.shape
       assert mn % 128 == 0 and k % 4 == 0, scales.shape
@@ -1699,8 +1725,8 @@ class TCGen05Test(TestCase):
         kernel, (1, 1, 1), (128, 1, 1), args, out_shape, scratch_shape
     )(*args)
     x32, y32 = x.astype(np.float32), y.astype(np.float32)
-    a_logical_scales = jnp.repeat(a_scales, 32, axis=1).astype(jnp.float32)
-    b_logical_scales = jnp.repeat(b_scales, 32, axis=1).astype(jnp.float32)
+    a_logical_scales = jnp.repeat(a_scales, block_size, axis=1).astype(jnp.float32)
+    b_logical_scales = jnp.repeat(b_scales, block_size, axis=1).astype(jnp.float32)
     ref = (x32 * a_logical_scales) @ (y32 * b_logical_scales).T
     np.testing.assert_allclose(z, ref, atol=2e-4, rtol=5e-6)
 
