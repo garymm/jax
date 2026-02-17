@@ -24,6 +24,11 @@ implements fault tolerance.
     works fully on GPUs. It has rough edges, is probably buggy, and is subject
     to change. Use at your own risk.
 
+.. note::
+
+    If you're looking for an alternative to fault-tolerant multi-controller JAX
+    on TPU, consider `Pathways`_.
+
 
 .. _part1:
 
@@ -286,7 +291,7 @@ processes to execute A while others execute B.
 .. code-block:: python
 
     try:
-      with live_devices(jax.live_devices()) as devices:
+      with live_devices(jax.devices()) as devices:
         ...
     except Exception as e:
       ... # Branch A
@@ -312,7 +317,7 @@ unexpected ways. For example, consider the following code that performs a
     x = ...
     y = ...
     try:
-      with live_devices(jax.live_devices()) as devices:
+      with live_devices(jax.devices()) as devices:
         y = jnp.sum(x)
     except Exception as e:
       ... # Branch A
@@ -339,7 +344,7 @@ raise an exception.
     x = ...
     y = ...
     try:
-      with live_devices(jax.live_devices()) as devices:
+      with live_devices(jax.devices()) as devices:
         y = jax.block_until_ready(jnp.sum(x))
     except Exception as e:
       ... # Branch A
@@ -844,7 +849,7 @@ below.
       </svg>
     </div>
 
-In the next example, processes 0 and 1 start, call ``jax.live_devices``, and
+In the next example, processes 0 and 1 start, call ``live_devices``, and
 receive ``0,1`` as a reply. Process 2 is dead throughout the execution.
 
 .. raw:: html
@@ -1474,8 +1479,8 @@ issues we need to address before it is fully correct. For example,
   ``live_processes``, and it can be used to generate the set of live processes
   that should be used the next time the atomic code block is executed.
 
-All these details are handled and abstracted away by the ``jax.live_devices``
-API introduced in :ref:`part1`. ``jax.live_devices`` is a context manager that
+All these details are handled and abstracted away by the ``live_devices`` API
+introduced in :ref:`part1`. ``live_devices`` is a context manager that
 guarantees the atomic execution of a block of code. In the code snippet below,
 ``devices`` is a list of the devices on all live processes. The code block
 ``A`` will execute atomically across these processes. That is, either every
@@ -1515,10 +1520,11 @@ of every process. If a client ever detects that a process is dead or has
 restarted with a new incarnation id, then the client aborts all communicators
 with the failed incarnation id in its cache key.
 
+.. _NCCL: https://developer.nvidia.com/nccl
+.. _Pathways: https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro
 .. _asynchronous dispatch: https://docs.jax.dev/en/latest/async_dispatch.html
 .. _linearizability: https://cs.brown.edu/~mph/HerlihyW90/p463-herlihy.pdf
 .. _many things in distributed systems: https://en.wikipedia.org/wiki/Fallacies_of_distributed_computing
 .. _multi-controller JAX: https://docs.jax.dev/en/latest/multi_process.html
-.. _NCCL: https://developer.nvidia.com/nccl
 .. _reference: https://docs.jax.dev/en/latest/config_options.html#jax_enable_recoverability
 .. _share fate: https://en.wikipedia.org/wiki/Fate-sharing
