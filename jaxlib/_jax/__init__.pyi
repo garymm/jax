@@ -993,6 +993,7 @@ def get_c_api_client(
     distributed_client: DistributedRuntimeClient | None = ...,
     transfer_server_factory: TransferServerInterfaceFactory | None = ...,
     force_dcn_cross_host_transfers: bool = ...,
+    sort_devices_by_process_index: bool = ...,
 ) -> Client: ...
 def get_default_c_api_topology(
     arg0: str,

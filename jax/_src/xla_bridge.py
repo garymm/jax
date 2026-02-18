@@ -115,6 +115,14 @@ FORCE_DCN_CROSS_HOST_TRANSFERS = config.bool_flag(
          "even when the plugin supports cross-host transfers."
 )
 
+SORT_DEVICES_BY_PROCESS_INDEX = config.bool_flag(
+    name="jax_sort_devices_by_process_index",
+    default=True,
+    help="Sort JAX devices by process index first, then by device id. "
+         "If False, sort devices only by device id, which preserves the "
+         "global device ordering assigned by the PJRT client."
+)
+
 CROSS_HOST_TRANSFER_SOCKET_ADDRESS = config.string_flag(
     name="jax_cross_host_transfer_socket_address",
     default="",
@@ -202,6 +210,7 @@ def make_tpu_client(
       distributed.global_state.client,
       _make_transfer_server_factory(),
       FORCE_DCN_CROSS_HOST_TRANSFERS.value,
+      SORT_DEVICES_BY_PROCESS_INDEX.value,
   )
 
 
@@ -555,6 +564,7 @@ def make_pjrt_c_api_client(
       distributed.global_state.client,
       _make_transfer_server_factory(),
       FORCE_DCN_CROSS_HOST_TRANSFERS.value,
+      SORT_DEVICES_BY_PROCESS_INDEX.value,
   )
 
 
