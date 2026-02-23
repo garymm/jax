@@ -229,12 +229,12 @@ class ColabDebugger(cli_debugger.CliDebugger):
     self._debugger_view = DebuggerView(self.current_frame())
     self.stdout = self.stdin = self._debugger_view  # type: ignore
 
-  def do_up(self, arg):
+  def do_up(self, arg, /):
     super().do_up(arg)
     self._debugger_view.update_frame(self.current_frame())
     return False
 
-  def do_down(self, arg):
+  def do_down(self, arg, /):
     super().do_down(arg)
     self._debugger_view.update_frame(self.current_frame())
     return False
