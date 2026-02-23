@@ -113,7 +113,8 @@ class NNFunctionsTest(jtu.JaxTestCase):
       dtype=[jnp.float16, jnp.bfloat16, jnp.float32],
   )
   def testScaledMatmul(self, contract, lhs_non_contract, dtype):
-    # ROCm: scaled_matmul works, skip only CUDA compute capability check
+    if not jtu.test_device_matches(["gpu"]):
+      raise unittest.SkipTest("Test requires GPU.")
     if jtu.is_device_cuda() and not jtu.is_cuda_compute_capability_at_least("10.0"):
       raise unittest.SkipTest("Needs compute capability 10.0 or higher.")
     # Check if float8_e8m0fnu is available
@@ -137,7 +138,8 @@ class NNFunctionsTest(jtu.JaxTestCase):
   )
   def testScaledDotGeneral(
       self, is_training, output_type):
-    # ROCm: scaled_dot_general works, skip only CUDA compute capability check
+    if not jtu.test_device_matches(["gpu"]):
+      raise unittest.SkipTest("Test requires GPU.")
     if jtu.is_device_cuda() and not jtu.is_cuda_compute_capability_at_least("10.0"):
       raise unittest.SkipTest("Needs compute capability 10.0 or higher.")
 
