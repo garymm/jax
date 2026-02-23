@@ -1454,13 +1454,14 @@ def _commute_transform(
         gpu_core.UnswizzleRef() as t1,
         state_types.ReshapeTransform() as t2,
     ):
-      assert isinstance(aval, jax_core.ShapedArray)
       new_reshape, new_unswizzle = t1.commute_reshape(aval, t2)
       return new_reshape, new_unswizzle
     case (
         gpu_core.UntilingTransform() | gpu_core.UnswizzleRef() as t1,
         gpu_core.TransposeTransform() as t2,
     ):
+      if isinstance(aval, state_types.AbstractRef):
+        aval = aval.inner_aval
       assert isinstance(aval, jax_core.ShapedArray)
       new_reshape, new_unswizzle = t1.commute_transpose(aval, t2)
       return new_reshape, new_unswizzle

@@ -978,7 +978,7 @@ class UnswizzleRef(state_types.Transform):
     return (self.swizzle * 8) // mgpu.bitwidth(dtype)
 
   def commute_transpose(
-      self, _: jax_core.ShapedArray, transpose: state_types.TransposeTransform
+      self, _: jax_core.AbstractValue, transpose: state_types.TransposeTransform
   ) -> tuple[state_types.TransposeTransform, UnswizzleRef]:
     perm = transpose.permutation
     if perm[-1] != len(perm) - 1:
