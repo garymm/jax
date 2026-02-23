@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import functools
-from typing import Any, ParamSpec, TypeVar
+from typing import cast, Any, ParamSpec, TypeVar
 
 from jax._src import api
 from jax._src import api_util
@@ -276,7 +276,7 @@ def _mpmd_map(
 
     for mesh, fn in meshes_and_fns:
       grid_spec = pallas_core.GridSpec(
-          grid=tuple(mesh.shape.items()),
+          grid=tuple(mesh.shape.items()),  # pyrefly: ignore[bad-argument-type]
           in_specs=in_tree.unflatten(
               pallas_core.BlockSpec(
                   memory_space=aval.memory_space
@@ -354,4 +354,4 @@ def _mpmd_map(
       )
     return out_tree.unflatten(flat_outs)
 
-  return wrapper
+  return cast(Callable[_P, _T], wrapper)

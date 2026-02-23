@@ -394,6 +394,7 @@ def _load_abstract_eval(*avals_flat, args_tree, **_):
   transformed_ref = pallas_core.TransformedRef(ref_aval, transforms)
   if mask_aval is not None:
     try:
+      # pyrefly: ignore[no-matching-overload]
       jnp.broadcast_shapes(transformed_ref.shape, mask_aval.shape)
     except ValueError:
       raise ValueError(
@@ -514,13 +515,13 @@ def _load_discharge_rule(in_avals, out_avals, *args_flat, args_tree, **_):
   *prev_transforms, idx = transforms
   assert isinstance(idx, NDIndexer)
   ref = state_discharge.transform_array(ref, prev_transforms)
-  if all((isinstance(s, Slice) or not s.shape) for s in idx.indices):
+  if all((isinstance(s, Slice) or not s.shape) for s in idx.indices):  # pyrefly: ignore[missing-attribute]
     # TODO(ayx): support strided load/store in interpret mode.
     for s in idx.indices:
       if isinstance(s, Slice) and s.stride > 1:
         raise NotImplementedError("Unimplemented stride support.")
     indices = idx.indices
-    scalar_dims = [not isinstance(s, Slice) and not s.shape for s in indices]
+    scalar_dims = [not isinstance(s, Slice) and not s.shape for s in indices]  # pyrefly: ignore[missing-attribute]
     slice_starts = [s.start if isinstance(s, Slice) else s for s in indices]
     slice_sizes = tuple(s.size if isinstance(s, Slice) else 1 for s in indices)
     # fixes an inconsistency with lax.dynamic_slice where if the slice goes out
@@ -637,7 +638,7 @@ def _swap_discharge_rule(in_avals, out_avals, *args_flat, args_tree, **_):
   *prev_transforms, idx = transforms
   assert isinstance(idx, NDIndexer)
   ref = state_discharge.transform_array(ref, prev_transforms)
-  if all((isinstance(s, Slice) or not s.shape) for s in idx.indices):
+  if all((isinstance(s, Slice) or not s.shape) for s in idx.indices):  # pyrefly: ignore[missing-attribute]
     # TODO(ayx): support strided load/store in interpret mode.
     for s in idx.indices:
       if isinstance(s, Slice) and s.stride > 1:
@@ -646,7 +647,7 @@ def _swap_discharge_rule(in_avals, out_avals, *args_flat, args_tree, **_):
     scalar_dims = [
         i
         for i, s in enumerate(indices)
-        if not isinstance(s, Slice) and not s.shape
+        if not isinstance(s, Slice) and not s.shape  # pyrefly: ignore[missing-attribute]
     ]
     slice_starts = [s.start if isinstance(s, Slice) else s for s in indices]
     slice_sizes = tuple(s.size if isinstance(s, Slice) else 1 for s in indices)
@@ -1016,8 +1017,10 @@ def _run_scoped_lowering_rule(ctx, *args, jaxpr, collective_axes):
     # Create inputs filled with uninitialized values to the body.
     num_consts = len(lower_fun_args)
     body_avals = [v.aval for v in discharged_body.invars[num_consts:]]
-    init_vals = [uninitialized_value(
-        aval.shape, aval.dtype) for aval in body_avals]
+    init_vals = [
+        # pyrefly: ignore[missing-attribute]
+        uninitialized_value(aval.shape, aval.dtype) for aval in body_avals
+    ]
     out = jax_core.eval_jaxpr(discharged_body, [], *lower_fun_args, *init_vals)
     return out[:num_return_values]
 

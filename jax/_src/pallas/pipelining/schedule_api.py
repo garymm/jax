@@ -11,11 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Internal API for the Pallas pipelining scheduler."""
+
 # mypy: ignore-errors
+# pyrefly: ignore-errors
 # pylint: disable=missing-function-docstring
 # pylint: disable=g-doc-args
 # pytype: disable=wrong-keyword-args
+
+"""Internal API for the Pallas pipelining scheduler."""
+
 import dataclasses
 from typing import Any, Optional, Sequence
 

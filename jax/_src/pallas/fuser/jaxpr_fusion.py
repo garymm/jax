@@ -208,7 +208,7 @@ def _construct_output_fusions(
   )
 
   # Construct fusions for each group by DCEing the jaxpr_out
-  output_fusions = []
+  output_fusions: list[fusion_lib.Fusion | None] = []
   for i, outvars_group in enumerate(partial_flat):
     flat_group_vars, _ = tree_util.tree_flatten(outvars_group)
     downstream_used_mask = downstream_outputs_used_masks[i]

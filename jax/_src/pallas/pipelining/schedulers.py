@@ -11,13 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pipeline scheduler implementations."""
+
 # mypy: ignore-errors
+# pyrefly: ignore-errors
 # pytype: disable=invalid-annotation
 # pytype: disable=wrong-arg-types
 # pytype: disable=bad-return-type
 # pylint: disable=missing-function-docstring
 # pylint: disable=g-doc-args
+
+"""Pipeline scheduler implementations."""
 
 import collections
 from collections.abc import Callable, Mapping, Sequence

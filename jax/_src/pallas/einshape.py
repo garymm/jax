@@ -70,6 +70,7 @@ from jax._src import core as jax_core
 from jax._src import dispatch
 from jax._src import typing as jax_typing
 from jax._src import hijax
+from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import mlir
 from jax._src.lax import lax
 from jax._src.pallas.mosaic import lowering as tpu_lowering
@@ -373,12 +374,12 @@ class Einshape(hijax.VJPHiPrimitive):
     self.params = dict(
         x_aval=x_aval,
         equation=equation,
-        sizes=sizes,  # type: ignore
+        sizes=FrozenDict(sizes),
         assert_is_tile_preserving=assert_is_tile_preserving,
     )
     super().__init__()
 
-  def expand(self, x: jax_typing.Array) -> jax_typing.Array:
+  def expand(self, x: jax_typing.Array) -> jax_typing.Array:  # pyrefly: ignore[bad-override]
     return einshape_lo(
         self.equation,
         x,

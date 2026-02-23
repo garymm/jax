@@ -118,12 +118,16 @@ def _pallas_call_abstract_eval(
     raise ValueError(f"input pinned buffers without input_output_aliases:"
                      f"{missing}")
   outin_aliases = {out_idx: in_idx for in_idx, out_idx in inout_aliases.items()}
-  out_avals = [avals[outin_aliases[out_idx]] if out_idx in outin_aliases else a
-               for out_idx, a in enumerate(out_avals)]
+  out_avals = tuple(
+      avals[outin_aliases[out_idx]] if out_idx in outin_aliases else a  # pyrefly: ignore[bad-index]
+      for out_idx, a in enumerate(out_avals)
+  )
   # Make sure we don't return ShapedArrayWithMemorySpace to the outside world.
-  out_avals = [a.unwrap()
-               if isinstance(a, pallas_core.ShapedArrayWithMemorySpace) else a
-               for a in out_avals]
+  out_avals = tuple(
+      a.unwrap()
+      if isinstance(a, pallas_core.ShapedArrayWithMemorySpace) else a
+      for a in out_avals
+  )
 
   # TODO(mattjj,yashkatariya): if we hide vmapped away mesh axes, use this:
   # if not (all(a.sharding.mesh.are_all_axes_manual for a in avals) and
@@ -362,7 +366,7 @@ def _batch_block_mapping(
       unflat_indices = (unflat_indices,)
     unflat_indices = list(unflat_indices)
     if dim is not batching.not_mapped:
-      unflat_indices.insert(dim, new_idx)
+      unflat_indices.insert(dim, new_idx)  # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
     return tuple(unflat_indices)
   idx_avals = [pallas_core.index_map_grid_aval, *block_mapping.index_map_jaxpr.in_avals]
 
@@ -380,9 +384,11 @@ def _batch_block_mapping(
     new_block_shape = shape
     new_array_aval = block_mapping.array_aval
   else:
+    # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
     new_block_shape = tuple_insert(shape, dim, pallas_core.squeezed)
 
     array_shape = block_mapping.array_aval.shape
+    # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
     array_shape = tuple_insert(array_shape, dim, axis_size)
 
     new_array_aval = jax_core.ShapedArray(
@@ -398,7 +404,6 @@ def _batch_block_mapping(
 
 def _broadcast_input_output_aliases(
     args: Sequence[jax_typing.Array],
-
     dims: Sequence[int | batching.NotMapped],
     *,
     input_output_aliases: tuple[tuple[int, int], ...],
@@ -422,6 +427,7 @@ def _broadcast_input_output_aliases(
           args_[input_index], axis_size, 0, None)
     elif dim != 0:
       # TODO(cjfj): Change output batching axis instead?
+      # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
       args_[input_index] = jnp.moveaxis(args[input_index], dim, 0)
 
   return tuple(args_), tuple(dims_)
@@ -458,7 +464,7 @@ def _batch_with_explicit_loop(
     raise NotImplementedError("vmapping pallas_call with no arguments.")
 
   (axis_size,) = {
-      arg.shape[dim]
+      arg.shape[dim]  # pyrefly: ignore[bad-index]  # pyrefly#2499
       for arg, dim in zip(args, dims)
       if dim is not batching.not_mapped
   }
@@ -494,7 +500,7 @@ def _batch_with_explicit_loop(
                     operand=arg,
                     start_index=batch_index,
                     slice_size=1,
-                    axis=dim,
+                    axis=dim,  # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
                 ),
                 axis=dim,
             )
@@ -584,7 +590,7 @@ def _pallas_call_batching_rule(
   if axis_size == 1:
     # Why are we even vmapping?
     manual_out_avals = [
-        o.update(sharding=o.sharding.update(mesh=_as_manual_mesh(o.sharding.mesh, ema)))
+        o.update(sharding=o.sharding.update(mesh=_as_manual_mesh(o.sharding.mesh, ema)))  # pyrefly: ignore[missing-attribute]
         for o in out_avals] if ema else out_avals
     def temp_f(*args):
       args = map(_maybe_squeeze_out_bdim, args, dims)
@@ -753,6 +759,7 @@ def _pallas_call_batching_rule(
 
   batched_out_avals = []
   for aval in out_avals:
+    assert isinstance(aval, jax_core.ShapedArray)
     manual_mesh = (_as_manual_mesh(aval.sharding.mesh, ema) if ema else
                    aval.sharding.mesh)
     sharding = aval.sharding.update(
@@ -854,7 +861,7 @@ def pallas_call_checkify_oob_grid(error: checkify.Error,
       local_grid_env = grid_mapping.local_grid_env(loop_idx, grid)
     else:
       local_grid_env = tuple(
-          pallas_core.GridAxis(idx, b)
+          pallas_core.GridAxis(idx, b)  # pyrefly: ignore[bad-argument-type]
           for dim, (idx, b) in enumerate(zip(loop_idx, grid))
           if dim not in grid_mapping.vmapped_dims
       )
@@ -907,7 +914,7 @@ def pallas_call_checkify_rule(error: checkify.Error,
   #   returning them, since pallas kernels do not return outputs.
   # 4) Create block specs for the error state and call pallas_call with
   #   the new kernel.
-  dynamic_grid_bounds, scalars, args = split_list(
+  dynamic_grid_bounds, scalars, args = split_list(  # pyrefly: ignore[bad-assignment]
       args, [grid_mapping.num_dynamic_grid_bounds,
              grid_mapping.num_index_operands]
   )
@@ -1050,9 +1057,9 @@ def _trace_kernel_to_jaxpr(
     fun: Callable,
     debug_info: jax_core.DebugInfo,
     grid_mapping: GridMapping,
-    kernel_avals: tuple[pallas_core.AbstractMemRef, ...],
+    kernel_avals: tuple[state.AbstractRef, ...],
     kernel_in_tree: tree_util.PyTreeDef,
-    kernel_in_transforms: tuple[tuple[pallas_core.Transform, ...], ...],
+    kernel_in_transforms: tuple[tuple[state.Transform, ...], ...],
     indexer: bool = False,
 ) -> tuple[jax_core.Jaxpr, tuple[jax_typing.Array, ...]]:
   wrapped_kernel_fun, out_tree_thunk = api_util.flatten_fun_nokwargs(
@@ -1543,7 +1550,7 @@ def _pallas_call(
             f"[0, {len(flat_out_avals)})")
       in_aval = flat_in_avals[i_idx]
       out_aval = flat_out_avals[o_idx]
-      if in_aval.shape != out_aval.shape or in_aval.dtype != out_aval.dtype:
+      if in_aval.shape != out_aval.shape or in_aval.dtype != out_aval.dtype:  # pyrefly: ignore[missing-attribute]
         raise ValueError(
             f"input_output_aliases contains the mapping '{i_idx}:{o_idx}' "
             f"referring to input{tree_util.keystr(in_paths[i_idx])} with "

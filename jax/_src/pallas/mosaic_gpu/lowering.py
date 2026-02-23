@@ -1454,6 +1454,7 @@ def _commute_transform(
         gpu_core.UnswizzleRef() as t1,
         state_types.ReshapeTransform() as t2,
     ):
+      # pyrefly: ignore[bad-argument-type]
       new_reshape, new_unswizzle = t1.commute_reshape(aval, t2)
       return new_reshape, new_unswizzle
     case (
