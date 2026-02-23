@@ -167,41 +167,45 @@ NB_MODULE(_mosaic_gpu_ext, m) {
 
   auto tile_transform_attr =
       mlir::python::nanobind_adaptors::mlir_attribute_subclass(
-          m, "TileTransformAttr", mlirMosaicGpuIsATileTransformAttr)
-          .def_staticmethod(
-              "get",
-              [](std::vector<int32_t>& tiling, MlirContext ctx) {
-                return mlirMosaicGpuTileTransformAttrGet(ctx, tiling.data(),
-                                                         tiling.size());
-              },
-              nb::arg("tiling"), nb::arg("context").none() = nb::none(),
-              nb::sig(
-                  // clang-format: off
-                  "def get("
-                  "tiling: Sequence[int], "
-                  "context: mlir.ir.Context | None = None"
-                  ") -> TileTransformAttr"
-                  // clang-format: on
-                  ),
-              "Creates a TileTransformAttr with the given tiling.")
-          .def_property_readonly("tiling", [](MlirAttribute self) {
-            std::vector<int32_t> result;
-            result.reserve(mlirMosaicGpuTileTransformAttrGetTilingSize(self));
-            for (int i = 0;
-                 i < mlirMosaicGpuTileTransformAttrGetTilingSize(self); ++i) {
-              result.push_back(
-                  mlirMosaicGpuTileTransformAttrGetTiling(self, i));
-            }
-            return result;
-          });
-
-  mlir::python::nanobind_adaptors::mlir_attribute_subclass(
-      m, "TransposeTransformAttr", mlirMosaicGpuIsATransposeTransformAttr)
+          m, "TileTransformAttr", mlirMosaicGpuIsATileTransformAttr);
+  tile_transform_attr
       .def_staticmethod(
           "get",
-          [](std::vector<int32_t>& permutation, MlirContext ctx) {
-            return mlirMosaicGpuTransposeTransformAttrGet(
-                ctx, permutation.data(), permutation.size());
+          [cls = tile_transform_attr.get_class()](std::vector<int32_t>& tiling,
+                                                  MlirContext ctx) {
+            return cls(mlirMosaicGpuTileTransformAttrGet(ctx, tiling.data(),
+                                                         tiling.size()));
+          },
+          nb::arg("tiling"), nb::arg("context").none() = nb::none(),
+          nb::sig(
+              // clang-format: off
+              "def get("
+              "tiling: Sequence[int], "
+              "context: mlir.ir.Context | None = None"
+              ") -> TileTransformAttr"
+              // clang-format: on
+              ),
+          "Creates a TileTransformAttr with the given tiling.")
+      .def_property_readonly("tiling", [](MlirAttribute self) {
+        std::vector<int32_t> result;
+        result.reserve(mlirMosaicGpuTileTransformAttrGetTilingSize(self));
+        for (int i = 0; i < mlirMosaicGpuTileTransformAttrGetTilingSize(self);
+             ++i) {
+          result.push_back(mlirMosaicGpuTileTransformAttrGetTiling(self, i));
+        }
+        return result;
+      });
+
+  auto transpose_transform_attr =
+      mlir::python::nanobind_adaptors::mlir_attribute_subclass(
+          m, "TransposeTransformAttr", mlirMosaicGpuIsATransposeTransformAttr);
+  transpose_transform_attr
+      .def_staticmethod(
+          "get",
+          [cls = transpose_transform_attr.get_class()](
+              std::vector<int32_t>& permutation, MlirContext ctx) {
+            return cls(mlirMosaicGpuTransposeTransformAttrGet(
+                ctx, permutation.data(), permutation.size()));
           },
           nb::arg("permutation"), nb::arg("context").none() = nb::none(),
           nb::sig(
@@ -226,13 +230,16 @@ NB_MODULE(_mosaic_gpu_ext, m) {
         return result;
       });
 
-  mlir::python::nanobind_adaptors::mlir_attribute_subclass(
-      m, "SwizzleTransformAttr", mlirMosaicGpuIsASwizzleTransformAttr)
+  auto swizzle_transform_attr =
+      mlir::python::nanobind_adaptors::mlir_attribute_subclass(
+          m, "SwizzleTransformAttr", mlirMosaicGpuIsASwizzleTransformAttr);
+  swizzle_transform_attr
       .def_staticmethod(
           "get",
-          [](int32_t swizzle, MlirContext ctx) {
-            return mlirMosaicGpuSwizzleTransformAttrGet(
-                ctx, static_cast<int32_t>(swizzle));
+          [cls = swizzle_transform_attr.get_class()](int32_t swizzle,
+                                                     MlirContext ctx) {
+            return cls(mlirMosaicGpuSwizzleTransformAttrGet(
+                ctx, static_cast<int32_t>(swizzle)));
           },
           nb::arg("swizzle"), nb::arg("context").none() = nb::none(),
           nb::sig(

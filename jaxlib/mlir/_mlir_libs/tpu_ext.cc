@@ -54,23 +54,24 @@ NB_MODULE(_tpu_ext, m) {
               op, i, mlirStringRefCreateFromCString(name.c_str()), attr);
         });
 
-  mlir::python::nanobind_adaptors::mlir_type_subclass(m, "Float8EXMYType",
-                                                      mlirTpuIsAFloat8EXMYType)
+  auto float8_exmy_type = mlir::python::nanobind_adaptors::mlir_type_subclass(
+      m, "Float8EXMYType", mlirTpuIsAFloat8EXMYType);
+  float8_exmy_type
       .def_staticmethod(
           "get",
-          [](MlirType exmy_type, MlirContext ctx) {
-            return mlirTpuFloat8EXMYTypeGet(ctx, exmy_type);
+          [cls = float8_exmy_type.get_class()](MlirType exmy_type,
+                                               MlirContext ctx) {
+            return cls(mlirTpuFloat8EXMYTypeGet(ctx, exmy_type));
           },
-          nb::arg("exmy_type") = nullptr,
-          nb::arg("ctx") = nullptr,
-        nb::sig(
-          // clang-format: off
-          "def get("
-          "exmy_type: jaxlib.mlir.ir.Type | None = None, "
-          "ctx: jaxlib.mlir.ir.Context | None = None"
-          ") -> Float8EXMYType"
-          // clang-format: on
-          ))
+          nb::arg("exmy_type") = nullptr, nb::arg("ctx") = nullptr,
+          nb::sig(
+              // clang-format: off
+              "def get("
+              "exmy_type: jaxlib.mlir.ir.Type | None = None, "
+              "ctx: jaxlib.mlir.ir.Context | None = None"
+              ") -> Float8EXMYType"
+              // clang-format: on
+              ))
       .def_property_readonly("underlying_type", [](MlirType self) {
         return mlirTpuFloat8EXMYTypeGetUnderlyingType(self);
       });
