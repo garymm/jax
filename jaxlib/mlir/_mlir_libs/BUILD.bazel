@@ -20,7 +20,8 @@ load(
     "pywrap_binaries",
     "pywrap_library",
 )
-load("//jaxlib:symlink_files.bzl", "symlink_files", "symlink_inputs")
+load("//jaxlib:symlink_files.bzl", "symlink_inputs")
+load("//jaxlib/mlir/_mlir_libs:stubgen.bzl", "py_stubgen")
 
 package(
     default_visibility = [
@@ -49,40 +50,7 @@ nanobind_pywrap_extension(
     ],
 )
 
-pywrap_library(
-    name = "mlir_for_stubgen",
-    common_lib_def_files_or_filters = {
-        "jaxlib/mlir/_mlir_libs/mlir_for_stubgen_common": "mlir_for_stubgen.json",
-    },
-    visibility = ["//visibility:private"],
-    deps = [
-        ":_mlir",
-    ],
-)
-
-pywrap_binaries(
-    name = "mlir_for_stubgen_binaries",
-    dep = ":mlir_for_stubgen",
-    visibility = ["//visibility:private"],
-)
-
-symlink_files(
-    name = "stubgen_py",
-    srcs = ["@nanobind//:src/stubgen.py"],
-    dst = ".",
-    flatten = True,
-    visibility = ["//visibility:private"],
-)
-
-py_binary(
-    name = "stubgen",
-    srcs = [":stubgen_py"],
-    data = [":mlir_for_stubgen_binaries"],
-    main = "stubgen.py",
-    visibility = ["//visibility:private"],
-)
-
-genrule(
+py_stubgen(
     name = "_mlir_pyi",
     outs = [
         "_mlir/__init__.pyi",
@@ -90,10 +58,7 @@ genrule(
         "_mlir/passmanager.pyi",
         "_mlir/rewrite.pyi",
     ],
-    cmd = """
-        $(location :stubgen) -m jaxlib.mlir._mlir_libs._mlir -r -O $(RULEDIR)
-    """,
-    tools = [":stubgen"],
+    module = "jaxlib.mlir._mlir_libs._mlir",
 )
 
 nanobind_pywrap_extension(
@@ -264,7 +229,6 @@ nanobind_pywrap_extension(
 
 symlink_inputs(
     name = "_mlir_libs",
-    pytype_srcs = ["_mlir_pyi"],
     rule = pytype_library,
     symlinked_inputs = {"srcs": {
         ".": [
@@ -363,6 +327,11 @@ nanobind_pywrap_extension(
     ],
 )
 
+py_stubgen(
+    name = "_mlirHlo_pyi",
+    module = "jaxlib.mlir._mlir_libs._mlirHlo",
+)
+
 ##---------------------------------------------------------------------------##
 # Shardy Extensions
 ##---------------------------------------------------------------------------##
@@ -385,6 +354,11 @@ nanobind_pywrap_extension(
     ],
 )
 
+py_stubgen(
+    name = "_sdy_pyi",
+    module = "jaxlib.mlir._mlir_libs._sdy",
+)
+
 nanobind_pywrap_extension(
     name = "_sdyMpmd",
     srcs = [
@@ -401,6 +375,11 @@ nanobind_pywrap_extension(
         "@rules_python//python/cc:current_py_cc_headers",
         "@shardy//shardy/integrations/c/mpmd:mpmd_capi",
     ],
+)
+
+py_stubgen(
+    name = "_sdyMpmd_pyi",
+    module = "jaxlib.mlir._mlir_libs._sdyMpmd",
 )
 
 ##---------------------------------------------------------------------------##
@@ -424,6 +403,11 @@ nanobind_pywrap_extension(
     ],
 )
 
+py_stubgen(
+    name = "_chlo_pyi",
+    module = "jaxlib.mlir._mlir_libs._chlo",
+)
+
 nanobind_pywrap_extension(
     name = "_stablehlo",
     srcs = [
@@ -439,5 +423,69 @@ nanobind_pywrap_extension(
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
         "@stablehlo//:stablehlo_capi",
+    ],
+)
+
+py_stubgen(
+    name = "_stablehlo_pyi",
+    module = "jaxlib.mlir._mlir_libs._stablehlo",
+)
+
+##---------------------------------------------------------------------------##
+# Type stubs
+##---------------------------------------------------------------------------##
+
+pywrap_library(
+    name = "mlir_for_stubgen",
+    common_lib_def_files_or_filters = {
+        "jaxlib/mlir/_mlir_libs/mlir_for_stubgen_common": "mlir_for_stubgen.json",
+    },
+    visibility = ["//visibility:private"],
+    deps = [
+        ":_chlo",
+        ":_mlir",
+        ":_mlirHlo",
+        ":_sdy",
+        ":_sdyMpmd",
+        ":_stablehlo",
+    ],
+)
+
+pywrap_binaries(
+    name = "mlir_for_stubgen_binaries",
+    dep = ":mlir_for_stubgen",
+    visibility = ["//visibility:private"],
+)
+
+py_binary(
+    name = "stubgen",
+    srcs = ["stubgen_runner.py"],
+    data = [
+        ":mlir_for_stubgen_binaries",
+        "@nanobind//:src/stubgen.py",
+    ],
+    main = "stubgen_runner.py",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@rules_python//python/runfiles",
+    ],
+)
+
+sh_binary(
+    name = "normalize_stubs",
+    srcs = ["normalize_stubs.sh"],
+    env = {"JAXLIB_BUILD": "1"},
+    visibility = ["//visibility:private"],
+)
+
+filegroup(
+    name = "all_pyi",
+    srcs = [
+        ":_chlo_pyi",
+        ":_mlirHlo_pyi",
+        ":_mlir_pyi",
+        ":_sdyMpmd_pyi",
+        ":_sdy_pyi",
+        ":_stablehlo_pyi",
     ],
 )
