@@ -121,16 +121,45 @@ absl::StatusOr<ModuleImage*> GetModuleImage(std::string kernel_name,
                                             uint32_t shared_mem_bytes,
                                             std::string_view ptx,
                                             int compute_capability) {
-  auto key =
-      std::make_tuple(kernel_name, shared_mem_bytes, ptx, compute_capability);
+  // Since we want an efficient key lookup, we'd have to suffer a bit.
+  using KeyType = std::tuple<std::string, uint32_t, std::string, int>;
+  using LookupKeyType =
+      std::tuple<std::string_view, uint32_t, std::string_view, int>;
+
+  struct KeyHash {
+    using is_transparent = void;
+
+    size_t operator()(const KeyType &v) const {
+      return absl::Hash<KeyType>{}(v);
+    }
+    size_t operator()(const LookupKeyType &v) const {
+      return absl::Hash<LookupKeyType>{}(v);
+    }
+  };
+
+  struct KeyEq {
+    using is_transparent = void;
+
+    bool operator()(const KeyType &a, const KeyType &b) const { return a == b; }
+    bool operator()(const KeyType &a, const LookupKeyType &b) const {
+      return a == b;
+    }
+    bool operator()(const LookupKeyType &a, const KeyType &b) const {
+      return a == b;
+    }
+  };
 
   static absl::Mutex mutex;
-  static auto& module_images =
-      *new absl::flat_hash_map<decltype(key), std::unique_ptr<ModuleImage>>
+  static auto &module_images =
+      *new absl::flat_hash_map<KeyType, std::unique_ptr<ModuleImage>, KeyHash,
+                               KeyEq>
           ABSL_GUARDED_BY(mutex);
 
+  auto lookup_key = LookupKeyType{std::string_view(kernel_name),
+                                  shared_mem_bytes, ptx, compute_capability};
+
   absl::MutexLock lock(mutex);
-  auto it = module_images.find(key);
+  auto it = module_images.find(lookup_key);
   if (it != module_images.end()) return it->second.get();
 
 #ifdef JAX_GPU_HIP  // For HIP/ROCM just read the hsaco file
@@ -187,10 +216,12 @@ absl::StatusOr<ModuleImage*> GetModuleImage(std::string kernel_name,
                                /*preferred_cuda_dir=*/"", ptxas_extra_flags)));
 #endif
 
+  auto key = KeyType{kernel_name, shared_mem_bytes, ptx, compute_capability};
+  // the `key` object must be created before we move kernel_name below.
   auto [it2, success] = module_images.insert(
-      {std::move(key),
-       std::make_unique<ModuleImage>(
-           std::move(kernel_name), std::move(module_image), shared_mem_bytes)});
+      {std::move(key), std::make_unique<ModuleImage>(std::move(kernel_name),
+                                                     std::move(module_image),
+                                                     shared_mem_bytes)});
   CHECK(success);
   return it2->second.get();
 }
