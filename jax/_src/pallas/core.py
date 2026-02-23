@@ -178,7 +178,7 @@ class ShapedArrayWithMemorySpace(jax_core.ShapedArray):
         mesh_axis_types,
     )
 
-  def update(
+  def update(  # pyrefly: ignore[bad-override]
       self,
       shape=None,
       dtype=None,
@@ -239,11 +239,11 @@ class MemoryRef:
 
   @property
   def dtype(self):
-    return self.inner_aval.dtype
+    return self.inner_aval.dtype  # pyrefly: ignore[missing-attribute]
 
   @property
   def shape(self):
-    return self.inner_aval.shape
+    return self.inner_aval.shape  # pyrefly: ignore[missing-attribute]
 
   def __lt__(self, other):
     return (self.shape, self.dtype, self.memory_space) < (
@@ -974,6 +974,7 @@ class GridMapping:
   def in_shapes(self) -> Iterable[jax_core.ShapeDtypeStruct]:
     """The shapes of *index, *inputs."""
     index_shapes = (
+        # pyrefly: ignore[missing-attribute]
         jax_core.ShapeDtypeStruct(ia.shape, ia.dtype)
         for ia in self.index_map_avals[len(self.grid) :]
     )
@@ -1428,7 +1429,7 @@ def core_map(
       fun_args = (scratch_shapes, {})
 
     flat_args, in_tree = tree_util.tree_flatten(fun_args)
-    debug_info = api_util.debug_info("pallas_core_map", f, *fun_args)
+    debug_info = api_util.debug_info("pallas_core_map", f, *fun_args)  # pyrefly: ignore[bad-argument-type]
     flat_fun, out_tree_thunk = api_util.flatten_fun(
         lu.wrap_init(f, debug_info=debug_info), in_tree
     )

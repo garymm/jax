@@ -407,7 +407,7 @@ def pallas_call_hlo_interpret(
   # to catch OOB accesses.
 
   carry = map(_pad_to_block_dimension, carry, block_shapes)
-  carry.extend(scratch_values)
+  carry.extend(scratch_values)  # pyrefly: ignore[missing-attribute]  # pyrefly#2385
 
   num_inout_blocks = len(block_args) + len(out)
   grid_start_indices = (jnp.int32(0),) * len(grid)
@@ -430,7 +430,7 @@ def pallas_call_hlo_interpret(
       local_grid_env = grid_mapping.local_grid_env(loop_idx, grid)
     else:
       local_grid_env = tuple(
-          pallas_core.GridAxis(idx, b)
+          pallas_core.GridAxis(idx, b)  # pyrefly: ignore[bad-argument-type]
           for dim, (idx, b) in enumerate(zip(loop_idx, grid))
           if dim not in grid_mapping.vmapped_dims
       )

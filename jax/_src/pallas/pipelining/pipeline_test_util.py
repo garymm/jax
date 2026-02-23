@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Test utilities for the custom pipeline scheduling API."""
+
 import dataclasses
 from typing import Any, Sequence
 
@@ -39,7 +41,7 @@ def compare_lists(result, expected):
   """Returns if two lists are equal while respecting ``AnyOrder`` elements."""
   result_ptr = 0
   expected_ptr = 0
-  any_order_set = None
+  any_order_set: set[Any] | None = None
   while result_ptr < len(result) and expected_ptr < len(expected):
     cur_result = result[result_ptr]
     cur_expected = expected[expected_ptr]

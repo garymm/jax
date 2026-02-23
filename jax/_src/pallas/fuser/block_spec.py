@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
+# pyrefly: ignore-errors
+
+# TODO(sharadmv): Enable type checking.
+#
+# The vast majority of type errors are due to ``block_spec.index_map`` and
+# ``block_spec.block_shape`` being optional.
+
 """Utilities for pull block specs through a fusion."""
 
 from __future__ import annotations
@@ -46,8 +54,6 @@ from jax._src.traceback_util import api_boundary
 import jax.numpy as jnp
 import numpy as np
 
-# TODO(sharadmv): Enable type checking.
-# mypy: ignore-errors
 
 pull_block_spec_rules: dict[core.Primitive, PullBlockSpecRuleFn] = {}
 
@@ -626,7 +632,7 @@ usage_rules: dict[core.Primitive, UsageRuleFn] = {}
 
 def register_usage_rule(
     prim: core.Primitive,
-) -> Callable[[UsageRuleFn], UsageRuleFn]:
+) -> Callable[[Any], UsageRuleFn]:
 
   def wrapper(
       f: UsageRuleFn,
@@ -656,7 +662,7 @@ eval_rules: dict[core.Primitive, EvalRuleFn] = {}
 
 def register_eval_rule(
     prim: core.Primitive,
-) -> Callable[[EvalRuleFn], EvalRuleFn]:
+) -> Callable[[Any], EvalRuleFn]:
   def wrapper(
       f: EvalRuleFn,
   ) -> EvalRuleFn:
@@ -682,7 +688,7 @@ class PullBlockSpecRuleFn(Protocol):
 
 def register_pull_block_spec_rule(
     prim: core.Primitive,
-) -> Callable[[PullBlockSpecRuleFn], PullBlockSpecRuleFn]:
+) -> Callable[[Any], PullBlockSpecRuleFn]:
 
   def wrapper(
       f: PullBlockSpecRuleFn,
@@ -2177,7 +2183,7 @@ class PushBlockSpecRuleFn(Protocol):
 
 def register_push_block_spec_rule(
     prim: core.Primitive,
-) -> Callable[[PushBlockSpecRuleFn], PushBlockSpecRuleFn]:
+) -> Callable[[Any], PushBlockSpecRuleFn]:
 
   def wrapper(
       f: PushBlockSpecRuleFn,
