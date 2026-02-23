@@ -86,7 +86,8 @@ def update_logging_level_global(logging_level: str | None) -> None:
 _jax_logger = logging.getLogger("jax")
 
 class _DebugHandlerFilter(logging.Filter):
-  def filter(self, _):
+  def filter(self, record):
+    del record  # Unused.
     return _jax_logger.level > logging.DEBUG
 
 _debug_handler = logging.StreamHandler(sys.stderr)
