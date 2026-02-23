@@ -1007,6 +1007,9 @@ class VectorSubcoreTest(PallasSCTest):
     np.testing.assert_array_equal(kernel(x), x + np.arange(self.num_lanes))
 
   def test_write_to_transformed_ref(self):
+    if not jtu.is_cloud_tpu_at_least(2026, 3, 1):
+      self.skipTest("Requires a newer libTPU")
+
     x = jnp.arange(2 * self.num_lanes)
 
     @self.vector_subcore_kernel(out_shape=x)
@@ -2031,6 +2034,8 @@ class MpmdMapTest(PallasSCTest):
     super().setUp()
 
   def test_parallel_subkernels(self):
+    if not jtu.is_cloud_tpu_at_least(2026, 3, 1):
+      self.skipTest("Need a newer libtpu")
     v_mesh = plsc.VectorSubcoreMesh(
         core_axis_name="core",
         subcore_axis_name="subcore",

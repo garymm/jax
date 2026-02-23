@@ -791,9 +791,9 @@ class OpsTest(ptu.PallasTPUTest):
     if not jtu.is_device_tpu_at_least(version=5):
       self.skipTest("Requires TPU v5+")
     if packed_dtype == jnp.int2:
-      if not jtu.is_cloud_tpu_at_least(2026, 2, 21):
+      if not jtu.is_cloud_tpu_at_least(2026, 3, 1):
         raise self.skipTest(
-            "int2 is only supported for tpu at least 02/21/2026"
+            "int2 is only supported for tpu at least 03/01/2026"
         )
       if (shape[-2] % (8 * 16)) or (shape[-1] % 128):
         raise self.skipTest(

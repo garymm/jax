@@ -1127,7 +1127,7 @@ class OpsTest(PallasBaseTest):
       if (
           fn in (jnp.sin, jnp.cos, jnp.tan)
           and dtype == "bfloat16"
-          and not jtu.is_cloud_tpu_at_least(2026, 2, 21)
+          and not jtu.is_cloud_tpu_at_least(2026, 3, 1)
       ):
         self.skipTest("requires a newer libTPU")
       # TODO(b/370578663): implement these lowerings on TPU
