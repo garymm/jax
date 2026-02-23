@@ -421,7 +421,7 @@ def _create_device_mesh_for_nd_torus_splitting_axes(
   ):
     # Go over all the possible assignment for the logical axis, including the
     # one that splits multiple physical axes.
-    best_logical_axis_assignment = None
+    best_logical_axis_assignment: np.ndarray | None = None
     for logical_axis_assignment in _enumerate_feasible_logical_axis_assignments(
         physical_mesh_shape, assignment, logical_axis_size
     ):

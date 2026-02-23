@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pyrefly: ignore-errors
 import datetime
 import numpy
 array = numpy.array

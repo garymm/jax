@@ -343,7 +343,7 @@ def _tpu_custom_call_lowering(
     input_output_aliases: tuple[tuple[int, int], ...],
     metadata: Any | None,
 ) -> ir.OpResultList:
-  result_types = [mlir.aval_to_ir_type(aval) for aval in out_avals]
+  result_types = mlir.flatten_ir_types(map(mlir.aval_to_ir_type, out_avals))
   axis_context = ctx.module_context.axis_context
   if isinstance(axis_context, sharding_impls.SPMDAxisContext):
     manual_axes = axis_context.manual_axes | set(axis_context.mesh.manual_axes)
@@ -369,7 +369,7 @@ def _tpu_custom_call_lowering(
     result_shapes = [
         mlir.shape_tensor(mlir.eval_dynamic_shape(ctx, aval_out.shape))
         for aval_out in ctx.avals_out]
-  extra_attributes = None
+  extra_attributes: dict[str, ir.Attribute] | None = None
   # Add kernel_name and kernel_metadata as attributes to the custom call op.
   # This is because we do not want to pollute the backend_config with this
   # information.
@@ -409,12 +409,13 @@ def _lower_mosaic_module_to_asm(
     module: ir.Module,
     *,
     ir_version: int | None = None,
-) -> tuple[ir.Module, tuple[bool, bool]]:
+) -> tuple[bytes, tuple[bool, bool]]:
   has_communication, has_custom_barrier = tpu.private_has_communication(  # pyrefly: ignore[missing-attribute]
       module.operation
   )
   # We'll mutate the module, so clone it
-  with module.context as ctx, module.operation.location as _:
+  ctx = module.context
+  with ctx, module.operation.location as _:
     module_op = module.operation.clone()
     prev_allow_unregistered_dialects = ctx.allow_unregistered_dialects
     ctx.allow_unregistered_dialects = True

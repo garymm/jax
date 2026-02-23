@@ -151,7 +151,7 @@ if hasattr(mosaic_gpu_dialect, 'init_cc_mlir'):
   try:
     from jaxlib.mlir import ir  # type: ignore[import-not-found]
   except ImportError:
-    from mlir import ir
+    from mlir import ir  # type: ignore[import-not-found]
   mosaic_gpu_dialect.init_cc_mlir(ir)
 
 import jaxlib.mosaic.python.tpu as tpu  # pytype: disable=import-error  # noqa: F401

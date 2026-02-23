@@ -1774,6 +1774,7 @@ def _get_lowering_rule(
         case None:
           return mgpu.FragmentedArray.load_strided(x_smem, is_signed=is_signed)
         case _:
+          assert isinstance(ctx.out_layout_hint, mgpu.TiledLayout)
           return mgpu.FragmentedArray.load_untiled(
               x_smem,
               is_signed=is_signed,
