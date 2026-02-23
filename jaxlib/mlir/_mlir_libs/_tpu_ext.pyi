@@ -12,25 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from jaxlib.mlir import ir
+from mlir import ir
 
 def register_dialect(context: ir.Context, load: bool = ...) -> None: ...
+def private_has_communication(
+    arg: ir.Operation, /
+) -> tuple[bool, bool]: ...
+def private_set_arg_attr(
+    arg0: ir.Operation, arg1: int, arg2: str, arg3: ir.Attribute, /
+) -> None: ...
 
-class PointerType(ir.Type):
+class Float8EXMYType(ir.Type):
   @staticmethod
   def isinstance(other_type: ir.Type) -> bool: ...
   def __repr__(self) -> str: ...
   @staticmethod
-  def get_static_typeid() -> ir.TypeID: ...
-  @staticmethod
-  def get(pointee_type: ir.Type, address_space: int) -> PointerType:
-    """Creates a PointerType type."""
-
+  def get(
+      exmy_type: ir.Type | None = None, ctx: ir.Context | None = None
+  ) -> Float8EXMYType: ...
   @property
-  def pointee_type(self) -> ir.Type: ...
-  @property
-  def address_space(self) -> int: ...
-
-def infer_reduce_op_encoding(
-    arg0: ir.Attribute, arg1: int, /
-) -> ir.Attribute | None: ...
+  def underlying_type(self) -> ir.Type: ...
