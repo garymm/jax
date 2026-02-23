@@ -1052,10 +1052,10 @@ class BufferedRef(BufferedRefBase):
     if self.accum_ref is not None:
       accum_dtype = self.accum_ref.dtype
       def _init():
-        assert self.accum_ref  # pyrefly#40
+        assert self.accum_ref is not None  # pyrefly#40
         self.accum_ref[...] = jnp.zeros_like(self.accum_ref[...])
       def _set():
-        assert self.accum_ref  # pyrefly#40
+        assert self.accum_ref is not None  # pyrefly#40
         self.accum_ref[...] = self.current_ref[...].astype(accum_dtype)
       lax.cond(init, _init, _set)
 
