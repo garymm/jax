@@ -971,7 +971,7 @@ def _fwd_shardy_rule(value_types, result_types, layout, is_training, is_fp8):
     input_sharding[0] = ArrayMapping('batch', 'nhead', 'qseq', 'head')
   else:
     input_sharding[0] = ArrayMapping('batch', 'qseq', 'nhead', 'head')
-  input_sharding[2] += ('v',)
+  input_sharding[2] = ArrayMapping(*input_sharding[2], 'v')
 
   # The major dimensions are sharded like the query, the minor like the value.
   output_sharding = (ArrayMapping(*input_sharding[0][:-1], 'v'),)
