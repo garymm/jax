@@ -1456,7 +1456,6 @@ class AutoShardingPjitTest(jtu.JaxTestCase):
     inp = core.ShapedArray(input_data.shape, input_data.dtype)
     compiled = jit_tuple_identity_fn.lower(*([inp] * 2001)).compile()
 
-
     # Check sharding preservation for even numbered inputs.
     for i in range(1000):
       self.assertEqual(compiled.input_shardings[0][2*i], input_sharding)
@@ -6587,7 +6586,6 @@ class ShardingInTypesTest(jtu.JaxTestCase):
 
   @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
   def test_manual_mode_mix_random(self, mesh):
-    self.skipTest('Failing.')
     s = NamedSharding(mesh, P('x'))
     keys = jax.random.split(jax.random.key(0), 2)
     keys = reshard(keys, s)
@@ -10470,17 +10468,10 @@ class PJitErrorTest(jtu.JaxTestCase):
     with self.assertRaises(IndivisibleError):
       pjit(lambda x: x, in_shardings=spec, out_shardings=None)(x)
 
-  @unittest.skip("regressed")  # TODO(mattjj): fix test
   @check_1d_2d_mesh(set_mesh=True)
   def testNonDivisibleOuts(self, mesh, resources):
     x = jnp.ones((3, 2))
-    spec = P(resources, None)
-    mesh_size = str(math.prod([dim[1] for dim in mesh]))
-    error = re.compile(
-        r"One of pjit outputs with pytree key path result\['rrr'\].*" + spec_regex(spec) + r".*"
-        r"implies that the global size of its dimension 0 should be "
-        r"divisible by " + mesh_size + r", but it is equal to 3", re.M | re.S)
-    with self.assertRaisesRegex(ValueError, error):
+    with self.assertRaisesRegex(ValueError, "should evenly divide the shape"):
       pjit(lambda x: {'rrr': x}, in_shardings=None,
            out_shardings=P(resources, None))(x)
 
