@@ -284,6 +284,8 @@ class VectorSubcoreTest(PallasSCTest):
     np.testing.assert_array_equal(kernel(x), x.sum(axis=0))
 
   def test_get_multi_index(self):
+    self.skip_if_tc_tiling()
+
     @self.vector_subcore_kernel(
         out_shape=jax.ShapeDtypeStruct(shape=(self.num_lanes,), dtype=jnp.int32)
     )
@@ -512,6 +514,10 @@ class VectorSubcoreTest(PallasSCTest):
     np.testing.assert_array_equal(kernel(x, indices), x[1, 8:][indices])
 
   def test_gather_1d_with_indexed_ref(self):
+    self.skip_if_tc_tiling(
+        "The test does a :8 slice which is not supported under TC tiling"
+    )
+
     x = jnp.arange(16)
     indices = jax.random.permutation(jax.random.key(42), jnp.arange(16))
 
@@ -544,7 +550,7 @@ class VectorSubcoreTest(PallasSCTest):
     )
     def kernel(x_hbm_ref, indices_ref, o_ref):
       pid = pl.program_id(0)  # Always zero.
-      num_indices = pid + indices_ref.size // 2
+      num_indices = pl.multiple_of(pid + indices_ref.size // 2, 8)
       pltpu.sync_copy(
           x_hbm_ref.at[indices_ref.at[pl.ds(0, num_indices)]],
           o_ref.at[pl.ds(0, num_indices)],
@@ -574,7 +580,7 @@ class VectorSubcoreTest(PallasSCTest):
     )
     def kernel(x_hbm_ref, indices_ref, o_ref):
       pid = pl.program_id(0)  # Always zero.
-      num_indices = pid + indices_ref.size // 4
+      num_indices = pl.multiple_of(pid + indices_ref.size // 4, 8)
       pltpu.sync_copy(
           x_hbm_ref.at[indices_ref.at[pid, pl.ds(0, num_indices)]],
           o_ref.at[pl.ds(0, num_indices)],
