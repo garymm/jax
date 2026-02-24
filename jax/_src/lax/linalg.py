@@ -1022,7 +1022,7 @@ def _eig_cpu_lowering(ctx, operand, *, compute_left_eigenvectors,
     output.append(vr)
   return output
 
-def _unpack_conjugate_pairs(w, vr):
+def _unpack_conjugate_pairs(w: Array, vr: Array) -> Array:
   # cusolver, like LAPACK, uses a packed representation of the complex
   # eigenvectors, where the (re, im) vectors are adjacent and shared by the
   # conjugate pair:
@@ -1041,7 +1041,7 @@ def _unpack_conjugate_pairs(w, vr):
   vr_shifted_left = lax.pad(vr, lax._zero(vr), pads)
   pads[-1] = (1, -1, 0)
   vr_shifted_right = lax.pad(vr, lax._zero(vr), pads)
-  dims = np.delete(np.arange(len(vr.shape), dtype=np.int32), -2)
+  dims = list(np.delete(np.arange(len(vr.shape), dtype=np.int32), -2))
   is_real = lax.broadcast_in_dim(is_real, vr.shape, broadcast_dimensions=dims)
   conj_pair_start = lax.broadcast_in_dim(conj_pair_start, vr.shape,
                                          broadcast_dimensions=dims)
@@ -1367,7 +1367,7 @@ def _householder_product_lowering(ctx, a, taus):
     result_shapes = None
   op = mlir.custom_call(
       "ProductOfElementaryHouseholderReflectors",
-      result_types=[mlir.aval_to_ir_type(aval_out)],
+      result_types=mlir.flatten_ir_types([mlir.aval_to_ir_type(aval_out)]),
       operands=[a, taus],
       api_version=1,
       result_shapes=result_shapes)
@@ -1561,10 +1561,11 @@ def _lu_cpu_gpu_lowering(ctx, operand, *, target_name_prefix: str):
 
 
 def _lu_tpu_lowering_rule(ctx, operand):
-  result_types = [
-    mlir.aval_to_ir_type(ctx.avals_out[0]),
-    mlir.aval_to_ir_type(ctx.avals_out[1]),
-    mlir.aval_to_ir_type(ctx.avals_out[2])]
+  result_types = mlir.flatten_ir_types([
+      mlir.aval_to_ir_type(ctx.avals_out[0]),
+      mlir.aval_to_ir_type(ctx.avals_out[1]),
+      mlir.aval_to_ir_type(ctx.avals_out[2]),
+  ])
   if any(not is_constant_shape(a.shape) for a in ctx.avals_out):
     result_shapes = [
       mlir.eval_dynamic_shape_as_tensor(ctx, a.shape)
@@ -1766,7 +1767,7 @@ def _geqrf_dtype_rule(dtype):
 def _geqrf_lowering_rule(ctx, operand):
   ts_type = mlir.aval_to_ir_type(ctx.avals_out[0])
   r_type = mlir.aval_to_ir_type(ctx.avals_out[1])
-  result_types = [ts_type, r_type]
+  result_types = mlir.flatten_ir_types([ts_type, r_type])
   if any(not is_constant_shape(aval_out.shape)
          for aval_out in ctx.avals_out):
     result_shapes = [
@@ -1895,6 +1896,7 @@ def _qr_lowering(a, *, pivoting, full_matrices, use_magma):
       return q, r, p
     return q, r
 
+  p = None
   if pivoting:
     jpvt = lax.full((*batch_dims, n), 0, dtype=np.dtype(np.int32))
     r, p, taus = geqp3(a, jpvt, use_magma=use_magma)
@@ -1913,6 +1915,7 @@ def _qr_lowering(a, *, pivoting, full_matrices, use_magma):
     r = r[..., :n, :n]
   r = _triu(r)
   if pivoting:
+    assert p is not None
     return q, r, p
   return q, r
 
@@ -2248,7 +2251,7 @@ def _svd_gpu_sub_lowering(ctx, operand, *, full_matrices, compute_uv,
   if (use_jacobi or use_polar) and compute_uv:
     vt = hlo.transpose(
         vt,
-        mlir.dense_int_array(np.array(tuple(range(nb)) + (nb + 1, nb))))
+        mlir.dense_int_array(tuple(range(nb)) + (nb + 1, nb)))
     if np.issubdtype(operand_aval.dtype, np.complexfloating):
       vt = hlo.complex(hlo.real(vt), hlo.negate(hlo.imag(vt)))
     if not full_matrices and not econ:
@@ -2419,7 +2422,7 @@ def _triangular_solve_lowering(
   out = hlo.triangular_solve(a, b, ir.BoolAttr.get(left_side),
                              ir.BoolAttr.get(lower),
                              ir.BoolAttr.get(unit_diagonal),
-                             hlo.TransposeAttr.get(transpose))
+                             hlo.TransposeAttr.get(transpose))  # pyrefly: ignore[missing-attribute]
   return [mlir.lower_with_sharding_in_types(ctx, out, out_aval)]
 
 
@@ -2456,6 +2459,7 @@ def _triangular_solve_cpu_lower(
     return [hlo.triangular_solve(a, b, ir.BoolAttr.get(left_side),
                                  ir.BoolAttr.get(lower),
                                  ir.BoolAttr.get(unit_diagonal),
+                                 # pyrefly: ignore[missing-attribute]
                                  hlo.TransposeAttr.get(transpose))]
 
 triangular_solve_p = linalg_primitive(
@@ -2560,6 +2564,7 @@ def _tridiagonal_solve_jvp_rule(primals, tangents):
   if all(type(p) is ad_util.Zero for p in diags_dot):
     rhs = b_dot
   else:
+    # pyrefly: ignore[bad-argument-count]  # pyrefly#2468
     matvec_dot = _tridiagonal_product(*map(ad.instantiate_zeros, diags_dot), ans)
     rhs = ad.add_tangents(b_dot, -matvec_dot)
   ans_dot = tridiagonal_solve_p.bind(*diags, rhs)

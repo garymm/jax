@@ -282,8 +282,8 @@ def _cpp_pjit(fun: Callable, jit_info: PjitInfo):
       _get_cpp_global_cache(cache_key.contains_explicit_attributes))
 
   cpp_pjitted_f = wraps(fun)(cpp_pjit_f)
-  cpp_pjitted_f._fun = fun
-  cpp_pjitted_f._jit_info = jit_info
+  cpp_pjitted_f._fun = fun  # pyrefly: ignore[missing-attribute]
+  cpp_pjitted_f._jit_info = jit_info  # pyrefly: ignore[missing-attribute]
   cpp_jitted_f_class = type(cpp_pjitted_f)
   cpp_jitted_f_class.clear_cache = jit_evict_fn
   cpp_jitted_f_class.lower = jit_lower
@@ -615,22 +615,24 @@ def _infer_params(
 def _infer_input_type(fun: Callable, dbg_fn: Callable[[], core.DebugInfo],
                       explicit_args) -> tuple[core.AbstractValue, ...]:
   avals = []
+  i = -1
+  x = None
   try:
     for i, x in enumerate(explicit_args):
       avals.append(core.shaped_abstractify(x))
   except OverflowError:
     dbg = dbg_fn()
-    arg_path = f"argument path is {dbg.arg_names[i] if dbg.arg_names is not None else 'unknown'}"  # pytype: disable=name-error
+    arg_path = f"argument path is {dbg.arg_names[i] if dbg.arg_names is not None else 'unknown'}"
     raise OverflowError(
       "An overflow was encountered while parsing an argument to a jitted "
-      f"computation, whose {arg_path}. Got {type(x)} with value {x}"  # pytype: disable=name-error
+      f"computation, whose {arg_path}. Got {type(x)} with value {x}"
     ) from None
   except TypeError:
     dbg = dbg_fn()
-    arg_description = f"path {dbg.arg_names[i] if dbg.arg_names is not None else 'unknown'}"  # pytype: disable=name-error
+    arg_description = f"path {dbg.arg_names[i] if dbg.arg_names is not None else 'unknown'}"
     raise TypeError(
       f"Error interpreting argument to {fun} as an abstract array."
-      f" The problematic value is of type {type(x)} and was passed to"  # pytype: disable=name-error
+      f" The problematic value is of type {type(x)} and was passed to"
       f" the function at {arg_description}.\n"
       "This typically means that a jit-wrapped function was called with a non-array"
       " argument, and this argument was not marked as static using the"
@@ -710,7 +712,7 @@ def _create_sharding_with_device_backend(device, backend):
     out = SingleDeviceSharding(xb.get_backend(backend).local_devices()[0])
   else:
     raise AssertionError('Unreachable!')
-  out._device_backend = True
+  out._device_backend = True  # pyrefly: ignore[missing-attribute]
   return out
 
 
@@ -1211,7 +1213,7 @@ def _pjit_call_impl_python(
   if compiled._auto_spmd_lowering and config.enable_checks.value:
     pxla.check_array_xla_sharding_layout_match(
         args, compiled._in_shardings, compiled._in_layouts,  # type: ignore
-        jaxpr.jaxpr._debug_info, compiled._kept_var_idx)
+        jaxpr.jaxpr.debug_info.safe_arg_names(len(args)))
   if config.distributed_debug.value:
     # Defensively only perform fingerprint logic if debug logging is enabled
     # NOTE(skyewm): I didn't benchmark this
@@ -1478,6 +1480,7 @@ def _pjit_batcher(axis_data, vals_in,
       if axis_in is not None else i
       for axis_in, i, aval in zip(dims_in, in_shardings, new_jaxpr.in_avals))
   out_shardings = tuple(
+      # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
       _pjit_batcher_for_sharding(o, axis_out, axis_data.spmd_name, ctx_mesh,
                                  aval.ndim)
       if axis_out is not None else o
@@ -1919,6 +1922,7 @@ def _pjit_transpose_fancy(
       # but not `fun.call_wrapped` on the same arguments. Let's tell the user.
       api_util._raise_no_nan_in_deoptimized(e)
 
+  # pyrefly: ignore[unbound-name]  # pyrefly#2219
   for x, ct in zip(args, tree_unflatten(out_tree, cts_out)):
     if isinstance(x, ad.ValAccum): x.accum(ct)
 

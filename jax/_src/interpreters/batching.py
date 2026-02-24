@@ -51,7 +51,7 @@ ToEltHandler = Callable[[Callable, GetIdx, Vmappable, MapSpec], Elt]
 FromEltHandler = Callable[[Callable, AxisSize, Elt, MapSpec], Vmappable]
 MakeIotaHandler = Callable[[AxisSize], Array]
 
-def to_elt(trace: Trace, get_idx: GetIdx, x: Vmappable, spec: MapSpec) -> Elt:
+def to_elt(trace: BatchTrace, get_idx: GetIdx, x: Vmappable, spec: MapSpec) -> Elt:
   from jax._src import hijax  # type: ignore
   handler = to_elt_handlers.get(type(x))
   if handler:
@@ -133,7 +133,9 @@ not_mapped = None
 class BatchTracer(Tracer):
   __slots__ = ['val', 'batch_dim', 'source_info']
 
-  def __init__(self, trace, val, batch_dim: NotMapped | int,
+  _trace: BatchTrace  # pyrefly: ignore[bad-override]
+
+  def __init__(self, trace: BatchTrace, val, batch_dim: NotMapped | int,
                source_info: source_info_util.SourceInfo | None = None):
     if config.enable_checks.value:
       # assert type(batch_dim) in (NotMapped, int)
@@ -161,6 +163,7 @@ class BatchTracer(Tracer):
     elif type(self.batch_dim) is int:
       return core.mapped_aval(aval.shape[self.batch_dim], self.batch_dim, aval)
     elif isinstance(aval, hijax.HiType):
+      # pyrefly: ignore[bad-argument-type]  # pyrefly#2499
       return aval.dec_rank(self._trace.axis_data.size, self.batch_dim)
     else:
       raise Exception("batch dim should be int or `not_mapped`")
@@ -246,7 +249,7 @@ class BatchTrace(Trace):
     with core.set_current_trace(self.parent_trace):
       return core.cur_qdd(val)
 
-  def process_primitive(self, p, tracers, params):
+  def process_primitive(self, p, tracers, params):  # pyrefly: ignore[bad-param-name-override]
     vals_in, dims_in = unzip2(map(self.to_batch_info, tracers))
     args_not_mapped = all(bdim is not_mapped for bdim in dims_in)
     if p in fancy_primitive_batchers:
@@ -317,7 +320,7 @@ class BatchTrace(Trace):
     src = source_info_util.current()
     return [BatchTracer(self, v, d, src) for v, d in zip(vals_out, dims_out_)]
 
-  def process_custom_jvp_call(self, prim, fun, jvp, tracers, *, symbolic_zeros):
+  def process_custom_jvp_call(self, prim, fun, jvp, tracers, *, symbolic_zeros):  # pyrefly: ignore[bad-param-name-override]
     in_vals, in_dims = unzip2(map(self.to_batch_info, tracers))
     fun, out_dims1 = batch_subtrace(fun, self.tag, self.axis_data, in_dims)
     jvp, out_dims2 = batch_custom_jvp_subtrace(jvp, self.tag, self.axis_data, in_dims)
@@ -327,7 +330,7 @@ class BatchTrace(Trace):
     src = source_info_util.current()
     return [BatchTracer(self, v, d, src) for v, d in zip(out_vals, out_dims)]
 
-  def process_custom_vjp_call(self, prim, fun, fwd, bwd, tracers, *, out_trees,
+  def process_custom_vjp_call(self, prim, fun, fwd, bwd, tracers, *, out_trees,  # pyrefly: ignore[bad-override]
                               symbolic_zeros):  # pytype: disable=signature-mismatch
     in_vals, in_dims = unzip2(map(self.to_batch_info, tracers))
     fwd_in_dims = [d for in_dim in in_dims for d in [in_dim, not_mapped]]
@@ -409,6 +412,7 @@ def vtile(f_flat: lu.WrappedFun,
     if axis is None:
       return out
     shape = list(out.shape)
+    # pyrefly: ignore[unsupported-operation]  # pyrefly#2529
     shape[axis:axis+2] = [shape[axis] * shape[axis+1]]
     return out.reshape(shape)
 

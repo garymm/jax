@@ -106,7 +106,7 @@ def xla_primitive_callable(prim: core.Primitive, **params):
       return prim.bind(*args, **params)
   prim_fun.__name__ = prim.name
   prim_fun.__qualname__ = prim.name
-  prim_fun._apply_primitive = True
+  prim_fun._apply_primitive = True  # pyrefly: ignore[missing-attribute]
   return api.jit(prim_fun)
 
 
@@ -429,6 +429,9 @@ def _device_put_sharding_impl(
 ):
   from jax.experimental import multihost_utils  # pytype: disable=import-error
 
+  # Use a dynamic type, because the static type depends on the value of
+  # ``x_is_jax_array``.
+  x_sharding: Any
   if isinstance(x, array.ArrayImpl):
     x_is_jax_array = True
     x_is_fully_addressable, x_sharding = x.is_fully_addressable, x.sharding
@@ -726,6 +729,7 @@ def _tpu_gpu_device_put_lowering(ctx, *xs, devices, srcs, copy_semantics):
               device._to_xla_hlo_sharding(aval.ndim).to_proto())
       mem_kind = (core.mem_space_to_kind(device)
                   if isinstance(device, core.MemorySpace) else device.memory_kind)
+      assert mem_kind is not None
       x = mlir.wrap_with_memory_kind(x, mem_kind, out_aval)
       return x
     return x

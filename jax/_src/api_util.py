@@ -19,7 +19,7 @@ import inspect
 import operator
 from functools import partial, lru_cache
 import re
-from typing import Any
+from typing import Any, NoReturn
 
 from jax._src import core
 from jax._src import config
@@ -699,8 +699,9 @@ class InternalFloatingPointError(Exception):
     self.name = name
     self.ty = ty
 
-def maybe_recursive_nan_check(e: Exception, fun: Callable, args, kwargs,
-) -> None:  # always raises an exception
+def maybe_recursive_nan_check(
+    e: Exception, fun: Callable, args, kwargs
+) -> NoReturn:
   print("Invalid nan value encountered in the output of a jax.jit "
         "function. Calling the de-optimized version.")
   try:
@@ -711,7 +712,7 @@ def maybe_recursive_nan_check(e: Exception, fun: Callable, args, kwargs,
     _raise_no_nan_in_deoptimized(e)
 
 
-def _raise_no_nan_in_deoptimized(e) -> None:
+def _raise_no_nan_in_deoptimized(e) -> NoReturn:
   msg = (f"{str(e)}. Because "
         "jax_config.debug_nans.value and/or config.jax_debug_infs is set, the "
         "de-optimized function (i.e., the function as if the `jit` "

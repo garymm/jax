@@ -73,7 +73,7 @@ class HiPrimitive(core.Primitive):
     assert False, "must override"
 
   # lowering implements the primitive in terms of lojax inputs/outputs/ops
-  def to_lojax(self, *lotypes_wrapped_in_hitypes, **params):
+  def to_lojax(self, *lotypes_wrapped_in_hitypes, **params):  # pyrefly: ignore[bad-override]
     assert False, f"must override for {self}"
 
   # autodiff interface
@@ -136,7 +136,7 @@ class MutableHiType(core.AbstractValue):
   def __eq__(self, other): assert False, "must override"
 
   # define lowering from (mutable) hijax type to (immutable) lojax types
-  def lo_ty_qdd(self, state: QDD) -> list[core.AbstractValue]:
+  def lo_ty_qdd(self, state: QDD, /) -> list[core.AbstractValue]:  # pytype: disable=signature-mismatch  # pyrefly: ignore[bad-override]
     assert False, "must override"
   def lo_ty(self):
     assert False, "mutable hitypes should use lo_ty_qdd instead"
@@ -293,18 +293,18 @@ effects.custom_derivatives_allowed_effects.add_type(BoxEffect)
 class NewBox(HiPrimitive):
   def is_high(self, *, treedef) -> bool: return True  # type: ignore
 
-  def abstract_eval(self, *, treedef):
+  def abstract_eval(self, *, treedef):  # pyrefly: ignore[bad-override]
     leaves, treedef = tree_flatten(None)
     qdd = BoxTypeState(tuple(leaves), treedef)
     return core.AvalQDD(BoxTy(), qdd), {box_effect}
 
-  def to_lojax(_, *, treedef):
+  def to_lojax(_, *, treedef):  # pyrefly: ignore[bad-override]
     return Box._new(None)
 
-  def jvp(_, primals, tangents, *, treedef):
+  def jvp(_, primals, tangents, *, treedef):  # pyrefly: ignore[bad-override]
     assert False  # TODO
 
-  def transpose(_, *args, treedef):
+  def transpose(_, *args, treedef):  # pyrefly: ignore[bad-override]
     assert False  # TODO
 new_box_p = NewBox('new_box')
 
@@ -313,15 +313,15 @@ class BoxSet(HiPrimitive):
 
   def is_high(self, *leaf_avals, treedef) -> bool: return True  # type: ignore
 
-  def abstract_eval(self, box_ty, *leaf_avals, treedef):
+  def abstract_eval(self, box_ty, *leaf_avals, treedef):  # pyrefly: ignore[bad-override]
     box_ty.mutable_qdd.update(BoxTypeState(leaf_avals, treedef))
     return [], {box_effect}  # TODO better typechecking...
 
-  def to_lojax(_, box, *leaves, treedef):
+  def to_lojax(_, box, *leaves, treedef):  # pyrefly: ignore[bad-override]
     box._val = tree_unflatten(treedef, leaves)
     return []
 
-  def jvp(_, primals, tangents, *, treedef):
+  def jvp(_, primals, tangents, *, treedef):  # pyrefly: ignore[bad-override]
     box, *vals = primals
     box_dot, *val_dots = tangents
     if type(box_dot) is ad_util.Zero:
@@ -331,7 +331,7 @@ class BoxSet(HiPrimitive):
     box_set_p.bind(box_dot, *val_dots, treedef=treedef)
     return [], []
 
-  def transpose(_, *args, treedef):
+  def transpose(_, *args, treedef):  # pyrefly: ignore[bad-override]
     assert False  # TODO
 box_set_p = BoxSet('box_set')
 
@@ -339,20 +339,20 @@ box_set_p = BoxSet('box_set')
 class BoxGet(HiPrimitive):
   multiple_results = True
 
-  def abstract_eval(self, box_ty, *, avals):
+  def abstract_eval(self, box_ty, *, avals):  # pyrefly: ignore[bad-override]
     return avals, {box_effect}
 
-  def to_lojax(_, box, *, avals):
+  def to_lojax(_, box, *, avals):  # pyrefly: ignore[bad-override]
     return tree_leaves(box._val)
 
-  def jvp(_, primals, tangents, *, avals):
+  def jvp(_, primals, tangents, *, avals):  # pyrefly: ignore[bad-override]
     (box,), (box_dot,) = primals, tangents
     return (
       box_get_p.bind(box, avals=avals),
       box_get_p.bind(box_dot, avals=tuple(a.to_tangent_aval() for a in avals))
     )
 
-  def transpose(_, *args):
+  def transpose(_, *args):  # pyrefly: ignore[bad-override]
     assert False  # TODO
 box_get_p = BoxGet('box_get')
 
@@ -384,7 +384,7 @@ class VJPHiPrimitive:
     raise NotImplementedError(f"subclass {type(self)} must implement `expand`")
 
   # reverse-mode AD interface
-  def vjp_fwd(self, nzs_in, *args):
+  def vjp_fwd(self, nzs_in, /, *args):
     raise NotImplementedError(f"for grad support, subclass {type(self)} must "
                               "implement `vjp_fwd`")
 
@@ -392,7 +392,7 @@ class VJPHiPrimitive:
     args_grad = self.vjp_bwd_retval(res, outgrad)
     tree_map(lambda acc, leaf_grad: acc.accum(leaf_grad), arg_accums, args_grad)
 
-  def vjp_bwd_retval(self, res, outgrad):
+  def vjp_bwd_retval(self, res, outgrad, /):
     # Classic API: returns values instead of using accumulators
     raise NotImplementedError(f"for grad support, subclass {type(self)} must "
                               "implement `vjp_bwd` or `vjp_bwd_retval`")
@@ -415,7 +415,7 @@ class VJPHiPrimitive:
     out_dim = self.batch_dim_rule(axis_data, dims)
     return VmapOf(self, axis_data, dims, out_dim)(*args), out_dim
 
-  def batch_dim_rule(self, axis_data, dims):
+  def batch_dim_rule(self, axis_data, dims, /):
     raise NotImplementedError(f"for vmap support, subclass {type(self)} must "
                               "implement `batch` or `batch_dim_rule`")
 
@@ -488,7 +488,7 @@ class VmapOf(VJPHiPrimitive):
     store = lambda: None
     def fwd(*args):
       primal_out, res, *maybe_out_nzs = self.prim.vjp_fwd(in_nzs, *args)  # type: ignore
-      store.out_nzs = maybe_out_nzs
+      store.out_nzs = maybe_out_nzs  # pyrefly: ignore[missing-attribute]
       return primal_out, res
     (primal_out, res), (_, res_axes) = api.vmap(
         fwd, in_axes=self.in_dims, out_axes=(self.out_dim, batching.infer),  # type: ignore
