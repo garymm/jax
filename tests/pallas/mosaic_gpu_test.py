@@ -4328,12 +4328,15 @@ class PallasCallTCGen05Test(PallasTCGen05Test):
     result = f(x, y)
     np.testing.assert_allclose(result, x @ y, rtol=1e-3)
 
-  def test_async_copy_smem_to_tmem(self):
+  @parameterized.parameters(128, None)
+  def test_async_copy_smem_to_tmem(self, swizzle):
     self.skip_if_wg_semantics()
     dtype = jnp.float16
-    swizzle = 128
     m, n = 128, 128
-    transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
+    if swizzle is None:
+      transforms = (plgpu.TilingTransform((8, 8)),)
+    else:
+      transforms = self.default_transforms(swizzle=swizzle, dtype=dtype)
 
     def kernel(x_gmem, y_gmem, smem, tma_barrier, mma_barrier, tmem):
       plgpu.copy_gmem_to_smem(x_gmem, smem, tma_barrier)

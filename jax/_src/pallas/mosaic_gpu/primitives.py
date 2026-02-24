@@ -3665,6 +3665,8 @@ def _async_copy_smem_to_tmem_lowering_rule(
         gpu_core.UntilingTransform(tiling),
     ):
       pass
+    case (gpu_core.UntilingTransform(tiling),):
+      swizzle = 16  # swizzle=16 is equivalent to no swizzle.
     case _:
       raise NotImplementedError(
           f"Unsupported transforms for SMEM ref: {smem_transforms}"
