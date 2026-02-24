@@ -40,6 +40,10 @@ struct MosaicSerdePass : public jaxlib::mlir::Pass<MosaicSerdePass, ModuleOp> {
   static constexpr llvm::StringLiteral kArgumentName = "mosaic-serde";
   static constexpr llvm::StringLiteral kPassName = "MosaicSerdePass";
 
+  // When this is bumped, we should file a TODO to update the forward-compatible
+  // version in tpu_custom_call.py in a month!
+  static constexpr int kVersion = 10;
+
   MosaicSerdePass() = default;
 
   explicit MosaicSerdePass(MosaicSerdePassOptions options) {

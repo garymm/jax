@@ -39,9 +39,6 @@ namespace {
 
 constexpr StringRef kMangledDialect = "stable_mosaic.";
 constexpr StringRef kVersionAttrName = "stable_mosaic.version";
-// When this is bumped, we should file a TODO to update the forward-compatible
-// version in tpu_custom_call.py in a month!
-constexpr int kVersion = 10;
 
 using SerdeRuleType = jaxlib::mosaic::SerdeRuleType;
 
@@ -338,7 +335,7 @@ void MosaicSerdePass::runOnOperation() {
   }
   int serialize_version = -1;
   if (serialize) {
-     serialize_version = target_version.hasValue() ? target_version : kVersion;
+    serialize_version = target_version.hasValue() ? target_version : kVersion;
   }
   if (failed(jaxlib::mosaic::RunSerde(
           module, upgrade_rules(), downgrade_rules(), serialize,
