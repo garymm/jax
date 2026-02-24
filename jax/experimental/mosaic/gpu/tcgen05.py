@@ -361,10 +361,14 @@ def mma(
         f"In {mode_name} MMA, N must be a multiple of {required_multiple},"
         f" got N={n}"
     )
-  if (is_sparse or is_scaled) and n.bit_count() != 1:
+  if is_sparse and n.bit_count() != 1:
     raise NotImplementedError(
-        "Only N that is power of 2 supported for sparse and block-scaled MMA,"
+        "Only N that is power of 2 supported for sparse MMA,"
         f" but got N={n}"
+    )
+  if is_scaled and n % 32 != 0:
+    raise NotImplementedError(
+        "N must be a multiple of 32 for block-scaled MMA, but got N={n}"
     )
   if n > 256 and n.bit_count() != 1:
     raise NotImplementedError(f"The only supported N > 256, is 512, but got N={n}")
@@ -417,10 +421,15 @@ def mma(
           f"A scale shape mismatch: expected ({m}, {k_scales}), got"
           f" {a_scale.shape}"
       )
-    if b_scale.shape != (n * num_cta, k_scales):
+    if b_scale.shape[0] % 128 or b_scale.shape[0] < n * num_cta:
       raise ValueError(
-          f"B scale shape mismatch: expected ({n}, {k_scales}), got"
-          f" {b_scale.shape}"
+          f"B scale shape[0] must be a multiple of 128 and >= N={n * num_cta},"
+          f" got {b_scale.shape[0]}"
+      )
+    if b_scale.shape != (b_scale.shape[0], k_scales):
+      raise ValueError(
+          f"B scale shape mismatch: expected ({b_scale.shape[0]}, {k_scales}),"
+          f" got {b_scale.shape}"
       )
   if is_sparse:
     a_sparse_metadata = cast(TMEMRef, a_sparse_metadata)
@@ -494,6 +503,8 @@ def mma(
   a_sparse_addr_base = a_sparse_metadata.address if is_sparse else None  # type: ignore
   a_scale_addr_base = a_scale.address if is_scaled else None  # type: ignore
   b_scale_addr_base = b_scale.address if is_scaled else None  # type: ignore
+  # B scales are padded when N is short, so it can't be derived from n_collective_group_elems.
+  b_scale_n_stride = cast(TMEMRef, b_scale).shape[0] // 32 if is_scaled else None
   for mi, ni, ki in np.ndindex(m_groups, n_groups, k_groups):
     if isinstance(a, TMEMRef):
       if m_groups != 1:
@@ -529,7 +540,7 @@ def mma(
       )
       b_scale_addr = arith.addi(
           b_scale_addr_base,
-          utils.c(ki * k_scales_per_group * n_collective_group_elems // 32, i32)
+          utils.c(ki * k_scales_per_group * b_scale_n_stride, i32)
       )
     else:
       a_scale_addr = b_scale_addr = None
@@ -556,6 +567,7 @@ def mma(
         b_k_strides=b_k_instr_strides,
         a_scale_addr=a_scale_addr,
         b_scale_addr=b_scale_addr,
+        b_scale_n_stride=b_scale_n_stride,
         a_sparse_addr=a_sparse_addr,
         accumulate=acc,
         element_type=mma_element_type,
@@ -573,6 +585,7 @@ def _do_mma(
     b_k_strides: tuple[tuple[int, ...], tuple[int, ...]],
     a_scale_addr: ir.Value | None,
     b_scale_addr: ir.Value | None,
+    b_scale_n_stride: int | None,
     a_sparse_addr: ir.Value | None,
     m: int,
     n: int,
@@ -698,10 +711,11 @@ def _do_mma(
           scale_id, scale_id, a_transpose, b_transpose
       )
       assert m == 128
-      assert (n * num_cta) % 128 == 0
+      assert (n * num_cta) % 32 == 0
+      assert b_scale_n_stride is not None
       # A scales are sharded, B scales are replicated across CTAs.
       a_scale_addr_offset = arith.constant(i32, k_step // scale_steps * 4)
-      b_scale_addr_offset = arith.constant(i32, k_step // scale_steps * n // 32 * num_cta)
+      b_scale_addr_offset = arith.constant(i32, k_step // scale_steps * b_scale_n_stride)
       scales_addrs = (
           arith.addi(a_scale_addr, a_scale_addr_offset),
           arith.addi(b_scale_addr, b_scale_addr_offset),
@@ -919,7 +933,7 @@ class TMEMLayout(fa.TiledLayout):
     for dim in self.lane_dims:
       if isinstance(dim, fa.Replicated):
         replication_factor *= dim.times
-    return math.prod(shape) // TMEM_ROWS // self.vector_length * replication_factor
+    return math.prod(shape) * replication_factor // TMEM_ROWS // self.vector_length
 
   def canonicalize(self) -> TMEMLayout:
     layout = super().canonicalize()
@@ -1037,8 +1051,11 @@ def scales_layout() -> TMEMLayout:
 
   See https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-a-layout-1x
   """
+  TMEM_QUARTER = TMEM_ROWS // 4
+  # Note that the * 4 after TMEM_QUARTER applies logically to rows, but it's
+  # split across 4 consecutive columns, not across the 4 quarters of TMEM.
   return TMEMLayout(
-      fa.Tiling(((TMEM_ROWS, 4), (TMEM_ROWS // 4, 1))),
+      fa.Tiling(((TMEM_QUARTER * 4, 4), (TMEM_QUARTER, 1))),
       warp_dims=(fa.Replicated(times=4),),
       lane_dims=(-2,),
       vector_dim=-3,
@@ -1536,19 +1553,22 @@ def async_copy_scales_smem_to_tmem(
   MMA issued in the same thread, no additional synchronization is needed.
 
   At the moment the function requires ``smem_ref`` to be contiguous and have a
-  shape of ``(MN // 128, K // 128, 32, 16)`` for 8-bit scales (here MN stands
-  for the size of the non-contracting dimension which is M or N), matching the
-  scale layout for .scale_vec::1X. See https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-a-layout-1x
+  shape of ``(MN // 128, K // 4, 32, 16)`` for 8-bit scales (here MN stands
+  for the size of the non-contracting dimension which is M or N, padded up to
+  a multiple of 128), matching the scale layout for .scale_vec::1X. See
+  https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-a-layout-1x
   for more details. Note that we always put the non-contracting dimension first.
-  If you have a (MN, K // 32) array of scales in JAX (where MN and K are
-  divisible by 128), you can prepare it for use in the kernel this way::
+  If you have a (MN, K // 32) array of scales in JAX (where MN is divisible by
+  32 and K is divisible by 128), you can prepare it for use in the kernel this
+  way (pad_mn = (MN + 127) // 128 * 128)::
 
-      scales.reshape(mn // 128, 4, 32, k // 4, 4)
-            .transpose(0, 3, 2, 1, 4)
-            .reshape(mn // 128, k // 4, 32, 16)
+      jnp.pad(scales, ((0, pad_mn - mn), (0, 0)))
+        .reshape(pad_mn // 128, 4, 32, k // 4, 4)
+        .transpose(0, 3, 2, 1, 4)
+        .reshape(pad_mn // 128, k // 4, 32, 16)
 
-  The TMEM ref is expected to have the logical shape of the scales
-  ``(MN, K // 32)``, and the layout created by ``scales_layout()``.
+  The TMEM ref is expected to have a shape of ``(pad_mn, K // 32)`` (i.e., with
+  MN padded to a multiple of 128), and the layout created by ``scales_layout()``.
   """
   i32 = ir.IntegerType.get_signless(32)
   smem_ty = ir.MemRefType(smem_ref.type)

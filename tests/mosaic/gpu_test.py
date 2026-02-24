@@ -1835,7 +1835,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
       in_jax_dtype=(jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float4_e2m1fn),
       scale_jax_dtype=(jnp.float8_e8m0fnu, jnp.float8_e4m3fn),
       m=(128,),  # TODO(apaszke): 256
-      n=(128, 256),  # TODO(apaszke): 192, other non-power-of-2
+      n=(32, 64, 128, 192, 256),
       swizzle=(32, 128),
   )
   def test_mma_block_scaled_basic(self, m, n, in_jax_dtype, scale_jax_dtype, swizzle):
@@ -1897,21 +1897,23 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
         jax.ShapeDtypeStruct(tile_shape(x_shape, lhs_tiling), in_jax_dtype),
         jax.ShapeDtypeStruct(tile_shape(y_shape, rhs_tiling), in_jax_dtype),
         jax.ShapeDtypeStruct((m // 128, k // (block_size * 4), 32, 16), scale_jax_dtype),
-        jax.ShapeDtypeStruct((n // 128, k // (block_size * 4), 32, 16), scale_jax_dtype),
+        jax.ShapeDtypeStruct(((n + 127) // 128, k // (block_size * 4), 32, 16), scale_jax_dtype),
         mgpu.TMABarrier(4),
         mgpu.Barrier(1),
         mgpu.TMEM((m, n), out_jax_dtype),
         mgpu.TMEM((m, k // block_size), scale_jax_dtype, layout=tcgen05.scales_layout()),
-        mgpu.TMEM((n, k // block_size), scale_jax_dtype, layout=tcgen05.scales_layout()),
+        mgpu.TMEM(((n + 127) // 128 * 128, k // block_size), scale_jax_dtype, layout=tcgen05.scales_layout()),
     ]
     a_scales, b_scales = self._sample_scales(m, k, n, block_size, scale_jax_dtype)
     def format_scales(scales):
       mn, k = scales.shape
-      assert mn % 128 == 0 and k % 4 == 0, scales.shape
+      assert mn % 32 == 0 and k % 4 == 0, scales.shape
+      pad_mn = (mn + 127) // 128 * 128
+      scales = jnp.pad(scales, ((0, pad_mn - mn), (0, 0)))
       return (
-          scales.reshape(mn // 128, 4, 32, k // 4, 4)
+          scales.reshape(pad_mn // 128, 4, 32, k // 4, 4)
           .transpose(0, 3, 2, 1, 4)
-          .reshape(mn // 128, k // 4, 32, 16)
+          .reshape(pad_mn // 128, k // 4, 32, 16)
       )
     a_gpu_scales, b_gpu_scales = map(format_scales, (a_scales, b_scales))
     args = (x, y, a_gpu_scales, b_gpu_scales)
@@ -1926,7 +1928,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
 
   @parameterized.product(
     m=(256,),
-    n=(128, 256),
+    n=(64, 128, 192, 256),
     scale_jax_dtype=(jnp.float8_e8m0fnu, jnp.float8_e4m3fn),
   )
   def test_mma_block_scaled_collective(self, m, n, scale_jax_dtype):
@@ -2026,7 +2028,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
             (m_block // 128, k // (scale_block * 4), 32, 16), scale_jax_dtype
         ),
         jax.ShapeDtypeStruct(
-            (n // 128, k // (scale_block * 4), 32, 16), scale_jax_dtype
+            ((n + 127) // 128, k // (scale_block * 4), 32, 16), scale_jax_dtype
         ),
         mgpu.TMABarrier(4),
         mgpu.Barrier(1),
@@ -2038,7 +2040,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
             collective=True,
         ),
         mgpu.TMEM(
-            (n, k // scale_block),
+            ((n + 127) // 128 * 128, k // scale_block),
             scale_jax_dtype,
             layout=tcgen05.scales_layout(),
             collective=True,
@@ -2049,11 +2051,13 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
 
     def format_scales(scales):
       mn, k = scales.shape
-      assert mn % 128 == 0 and k % 4 == 0, scales.shape
+      assert mn % 32 == 0 and k % 4 == 0, scales.shape
+      pad_mn = (mn + 127) // 128 * 128
+      scales = jnp.pad(scales, ((0, pad_mn - mn), (0, 0)))
       return (
-          scales.reshape(mn // 128, 4, 32, k // 4, 4)
+          scales.reshape(pad_mn // 128, 4, 32, k // 4, 4)
           .transpose(0, 3, 2, 1, 4)
-          .reshape(mn // 128, k // 4, 32, 16)
+          .reshape(pad_mn // 128, k // 4, 32, 16)
       )
 
     a_gpu_scales = format_scales(a_scales)
