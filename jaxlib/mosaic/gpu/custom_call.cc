@@ -877,8 +877,14 @@ struct CustomCallResources {
 //      iteration's `Execute(T)` has completed.
 //
 // This allows us to reliably clean up resources in `Prepare`.
-thread_local absl::NoDestructor<std::map<CustomCallResources*, DeviceState>>
-    device_states;
+std::map<CustomCallResources*, DeviceState>& GetDeviceStates() {
+  thread_local static std::unique_ptr<
+      std::map<CustomCallResources*, DeviceState>>
+      device_states = []() {
+        return std::make_unique<std::map<CustomCallResources*, DeviceState>>();
+      }();
+  return *device_states;
+}
 
 // Validate custom call attributes and compile the kernel.
 absl::StatusOr<std::unique_ptr<CustomCallResources>> InstantiateResources(
@@ -1093,7 +1099,7 @@ absl::Status MosaicGpuPrepare(
 
   // This is safe to do because this resource is thread-local, and all previous
   // executions are guaranteed to have completed.
-  device_states->clear();
+  GetDeviceStates().clear();
 
   TF_ASSIGN_OR_RETURN(xla::gpu::GpuCliqueKey clique_key,
                       GetCliqueKey(*collective_params, attributes));
@@ -1140,7 +1146,7 @@ absl::Status MosaicGpuInitialize(
       ConstructDeviceState(clique_key, current_rank, *collective_params, stream,
                            std::move(parameters)));
 
-  device_states->insert_or_assign(resources, std::move(device_state));
+  GetDeviceStates().insert_or_assign(resources, std::move(device_state));
   return absl::OkStatus();
 }
 
@@ -1164,7 +1170,7 @@ absl::Status MosaicGpuExecute(
       reinterpret_cast<cudaStream_t>(stream->platform_specific_handle().stream);
   // Adding a CPU version of the collective metadata for TMA initialization.
   if (uses_collective_metadata) {
-    DeviceState* device_state = &device_states->at(resources);
+    DeviceState* device_state = &GetDeviceStates().at(resources);
     // Use the collective metadata during the TMA initialization.
     buffer_ptrs.push_back(device_state->metadata_bytes.data());
 
