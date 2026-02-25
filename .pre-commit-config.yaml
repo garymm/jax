@@ -54,10 +54,10 @@ repos:
 # This is a manual-only pre-commit hook to run pyrefly type checks. To run it:
 # $ pre-commit run --hook-stage manual pyrefly-check --all-files
 - repo: https://github.com/facebook/pyrefly-pre-commit
-  rev: 9a1f9496fbaeef712203986d6953bb573f2511fe  # frozen: v0.52.0
+  rev: 0ed71f5d10c035e02f24a220058b39070d165142  # frozen: v0.54.0
   hooks:
     - id: pyrefly-check
       name: Pyrefly (type checking)
       pass_filenames: false
-      additional_dependencies: [absl-py==2.4.0, types-requests==2.31.0, numpy~=2.3.0, ml_dtypes~=0.5.0, scipy-stubs]
+      additional_dependencies: [absl-py==2.4.0, types-requests~=2.32.0, numpy~=2.4.0, ml_dtypes~=0.5.0, scipy-stubs]
       stages: [manual]
