@@ -1332,16 +1332,20 @@ void EnqueueDMAOp::build(OpBuilder& builder, OperationState& state,
 }
 
 LogicalResult EnqueueDMAOp::verify() {
+  auto target_sem_type = getMemRefType(getTargetSemaphore());
+  if (target_sem_type.getRank() != 0) {
+    return emitOpError("DMA target semaphore must be rank 0");
+  }
   auto source_sem = getSourceSemaphore();
   if (source_sem) {
     auto source_sem_type = getMemRefType(getSourceSemaphore());
     if (source_sem_type.getRank() != 0) {
       return emitOpError("DMA source semaphore reference must be rank 0");
     }
-  }
-  auto target_sem_type = getMemRefType(getTargetSemaphore());
-  if (target_sem_type.getRank() != 0) {
-    return emitOpError("DMA target semaphore must be rank 0");
+    if (source_sem_type.getElementType() != target_sem_type.getElementType()) {
+      return emitOpError(
+          "DMA source and target semaphore must have the same type");
+    }
   }
   auto source_ty = getMemRefType(getSource());
   auto target_ty = getMemRefType(getTarget());

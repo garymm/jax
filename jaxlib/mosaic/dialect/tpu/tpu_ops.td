@@ -1263,7 +1263,7 @@ def TPU_EnqueueDMAOp : TPU_Op<"enqueue_dma", [AttrSizedOperandSegments]> {
     AnyMemRef:$source,
     Optional<MemRefOf<[TPU_DMASemaphoreType]>>:$source_semaphore, // For remote DMAs
     AnyMemRef:$target,
-    MemRefOf<[TPU_DMASemaphoreType]>:$target_semaphore,
+    MemRefOf<[TPU_SomeSemaphoreType]>:$target_semaphore,
     Optional<I32>:$device_id, // For remote DMAs
     Optional<I32>:$core_id, // For megacore
     OptionalAttr<TPU_CoreTypeEnum>:$core_type, // For megachip
