@@ -460,6 +460,8 @@ class ShapePolyTest(jtu.JaxTestCase, parameterized.TestCase):
 class ExportTestWithTriton(jtu.JaxTestCase):
 
   def setUp(self):
+    if triton is None:
+      self.skipTest("Triton is not available on this platform")
     self.enter_context(pallas_call_lib._PALLAS_USE_MOSAIC_GPU(False))
     super().setUp()
 
