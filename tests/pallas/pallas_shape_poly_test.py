@@ -29,7 +29,10 @@ from jax._src import config
 from jax._src import test_util as jtu
 from jax._src.pallas import core
 from jax._src.pallas import pallas_call as pallas_call_lib
-from jax.experimental.pallas import triton as plgpu
+if sys.platform != "win32":
+  from jax.experimental.pallas import triton as plgpu
+else:
+  plgpu = None
 
 try:
   from jax._src.lib import triton
@@ -99,8 +102,8 @@ class ShapePolyTest(jtu.JaxTestCase, parameterized.TestCase):
     if (jtu.test_device_matches(["cuda"]) and
         not jtu.is_cuda_compute_capability_at_least("8.0")):
       self.skipTest("Only works on GPU with capability >= sm80")
-    if sys.platform == "win32":
-      self.skipTest("Only works on non-Windows platforms")
+    if plgpu is None:
+      self.skipTest("Triton is not available on this platform")
     super().setUp()
     # TODO(bchetioui): Remove this for H100+ once tests are all compatible with
     # Pallas/Mosaic GPU.
@@ -457,8 +460,6 @@ class ShapePolyTest(jtu.JaxTestCase, parameterized.TestCase):
 class ExportTestWithTriton(jtu.JaxTestCase):
 
   def setUp(self):
-    if sys.platform == "win32":
-      self.skipTest("Only works on non-Windows platforms")
     self.enter_context(pallas_call_lib._PALLAS_USE_MOSAIC_GPU(False))
     super().setUp()
 
