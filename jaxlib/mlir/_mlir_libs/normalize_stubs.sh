@@ -18,12 +18,20 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# Replace all occurrences of `mlir._mlir_libs._mlir.ir` with `mlir.ir`.
-sed -i 's/mlir\._mlir_libs\._mlir\.ir/mlir.ir/g' "$@"
-# Replace `import mlir.ir` with `from mlir import ir`.
-sed -i 's/import mlir\.ir/from mlir import ir/g' "$@"
-# Deduplicate `from mlir import ir` lines, keeping only the first one.
-sed -i -e '0,/^[[:space:]]*from mlir import ir[[:space:]]*$/b' \
-  -e '/^[[:space:]]*from mlir import ir[[:space:]]*$/d' "$@"
-# Replace `mlir.ir.<NAME>` with `ir.<NAME>`.
-sed -i -E 's/mlir\.ir\.([a-zA-Z0-9_]+)/ir.\1/g' "$@"
+if [ -n "${JAXLIB_BUILD:-}" ]; then
+  # If we are building jaxlib, normalize `mlir.ir` to `jaxlib.mlir.ir`
+  sed -i 's/\bmlir\.ir/jaxlib.mlir.ir/g' "$@"
+fi
+
+# Normalize `mlir.ir` imports:
+#   1. Replace internal module paths with public ones.
+#   2. Rewrite `import mlir.ir` to `from mlir import ir`.
+#   3. Deduplicate the resulting `from mlir import ir` lines.
+#   4. Shorten `mlir.ir.<NAME>` to `ir.<NAME>`.
+sed -i -E \
+  -e 's/mlir\._mlir_libs\._mlir\.ir/mlir.ir/g' \
+  -e 's/import (jaxlib\.)?mlir\.ir/from \1mlir import ir/g' \
+  -e '0,/^[[:space:]]*from (jaxlib\.)?mlir import ir[[:space:]]*$/b' \
+  -e '/^[[:space:]]*from (jaxlib\.)?mlir import ir[[:space:]]*$/d' \
+  -e 's/mlir\.ir\.([a-zA-Z0-9_]+)/ir.\1/g' \
+  "$@"
