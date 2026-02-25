@@ -1903,6 +1903,7 @@ def _qr_lowering(a, *, pivoting, full_matrices, use_magma):
     p -= 1  # Convert geqp3's 1-based indices to 0-based indices by subtracting 1.
   else:
     r, taus = geqrf(a)
+    p = None
 
   if m < n:
     q = householder_product(r[..., :m, :m], taus)

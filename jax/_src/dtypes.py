@@ -1063,7 +1063,7 @@ def check_and_canonicalize_user_dtype(dtype, fun_name=None) -> DType:
     )
     msg += f" in {fun_name}" if fun_name else ""
     raise TypeError(msg)
-  return _maybe_canonicalize_explicit_dtype(np_dtype, fun_name)
+  return _maybe_canonicalize_explicit_dtype(np_dtype, fun_name or "")
 
 def safe_to_cast(input_dtype_or_value: Any,
                  output_dtype_or_value: Any) -> bool:

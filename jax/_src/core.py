@@ -3047,7 +3047,7 @@ class MapPrimitive(Primitive):
     return trace.process_map(self, fun, tracers, params)
 
   def get_bind_params(self, params):
-    new_params = dict(params)
+    new_params: dict[str, Any] = dict(params)
     jaxpr: Jaxpr = new_params.pop('call_jaxpr')
     subfun = lu.hashable_partial(
         lu.wrap_init(eval_jaxpr, debug_info=jaxpr.debug_info), jaxpr, ())
