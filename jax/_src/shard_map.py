@@ -160,7 +160,21 @@ def shard_map(f: F | None = None, /, *, out_specs: Specs,
   return _shard_map(f, **kwargs)
 
 
-def smap(f=None, /, *, in_axes=Infer, out_axes, axis_name: AxisName):
+@overload
+def smap(f: F, /, *,
+         in_axes: int | None | InferFromArgs | tuple[Any, ...] = ...,
+         out_axes: Any, axis_name: AxisName) -> F: ...
+
+@overload
+def smap(f: None = None, /, *,
+         in_axes: int | None | InferFromArgs | tuple[Any, ...] = ...,
+         out_axes: Any, axis_name: AxisName
+         ) -> Callable[[G], G]: ...
+
+def smap(f: F | None = None, /, *,
+         in_axes: int | None | InferFromArgs | tuple[Any, ...] = Infer,
+         out_axes: Any, axis_name: AxisName
+         ) -> F | Callable[[G], G]:
   """Single axis shard_map that maps a function `f` one axis at a time.
 
   Args:
@@ -191,7 +205,8 @@ def smap(f=None, /, *, in_axes=Infer, out_axes, axis_name: AxisName):
     return lambda g: _smap(g, **kwargs)
   return _smap(f, **kwargs)
 
-def _smap(f, *, in_axes, out_axes, axis_name: AxisName):
+def _smap(f: F, *, in_axes: int | None | InferFromArgs | tuple[Any, ...],
+          out_axes: Any, axis_name: AxisName) -> F:
   if isinstance(axis_name, (list, tuple)):
     raise TypeError(
         f"smap axis_name should be a `str` or a `Hashable`, but got {axis_name}")
