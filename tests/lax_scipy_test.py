@@ -675,8 +675,8 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
     args_maker = lambda: [rng(yshape, dtype), rng(xshape, dtype) if xshape is not None else None]
     np_fun = partial(scipy.integrate.trapezoid, dx=dx, axis=axis)
     jnp_fun = partial(jax.scipy.integrate.trapezoid, dx=dx, axis=axis)
-    tol = jtu.tolerance(dtype, {np.float16: 2e-3, np.float64: 1e-12,
-                                jax.dtypes.bfloat16: 4e-2})
+    tol = jtu.tolerance(dtype, {np.float16: 2e-3, np.float32: 5e-6,
+                                np.float64: 1e-12, jax.dtypes.bfloat16: 4e-2})
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, tol=tol,
                             check_dtypes=False)
     self._CompileAndCheck(jnp_fun, args_maker, atol=tol, rtol=tol,
