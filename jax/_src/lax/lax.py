@@ -5654,8 +5654,8 @@ def get_algorithm_compute_types(
     algorithm: DotAlgorithm | DotAlgorithmPreset,
     lhs_dtype: DTypeLike,
     rhs_dtype: DTypeLike,
-    out_dtype: DTypeLike | None = None,
-) -> tuple[DTypeLike | None, DTypeLike | None, DTypeLike | None]:
+    out_dtype: DTypeLike,
+) -> tuple[DTypeLike, DTypeLike, DTypeLike]:
   if isinstance(algorithm, DotAlgorithm):
     return (
         algorithm.lhs_precision_type,
@@ -5663,10 +5663,10 @@ def get_algorithm_compute_types(
         algorithm.accumulation_type,
     )
 
-  def maybe_convert_dtype(input_dtype, target_dtypes):
+  def maybe_convert_dtype(input_dtype: DTypeLike, target_dtypes: Sequence[DTypeLike] | None) -> DTypeLike:
     if target_dtypes is None:
       return input_dtype
-    if np.dtype(input_dtype) in map(np.dtype, target_dtypes):
+    if np.dtype(input_dtype) in target_dtypes:
       return input_dtype
     return target_dtypes[0]
 
@@ -8097,7 +8097,7 @@ def _sort_batch_rule(batched_args, batch_dims, *, dimension, is_stable, num_keys
   new_args = []
   for arg, bdim in zip(batched_args, batch_dims):
     if bdim is None:
-      dims = np.delete(np.arange(prototype_arg.ndim), new_bdim)
+      dims = np.delete(np.arange(prototype_arg.ndim), new_bdim).tolist()
       new_args.append(broadcast_in_dim(
           arg, prototype_arg.shape, dims,
           out_sharding=typeof(prototype_arg).sharding))
@@ -8455,8 +8455,8 @@ def _array_copy(arr: ArrayLike) -> Array:
 
 def _which_dim_sharded(s: PmapSharding) -> int | None:
   sharded_dim = None
-  for i, s in enumerate(s.sharding_spec.sharding):
-    if isinstance(s, (pxla.Unstacked, pxla.Chunked)):
+  for i, s_i in enumerate(s.sharding_spec.sharding):
+    if isinstance(s_i, (pxla.Unstacked, pxla.Chunked)):
       sharded_dim = i
       break
   return sharded_dim

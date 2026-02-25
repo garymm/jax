@@ -19,6 +19,7 @@
 from functools import partial
 
 import numpy as np
+from typing import cast
 
 from jax._src import core
 from jax._src import dispatch
@@ -274,3 +275,11 @@ def int_dtype_for_shape(shape: Shape, *, signed: bool) -> DType:
       else:
         return dtypes.default_uint_dtype()
     return np.dtype(np.uint32)
+
+
+
+def ensure_shaped(*avals: core.AbstractValue) -> tuple[core.ShapedArray | state.AbstractRef, ...]:
+  """Cast all inputs to ShapedArray with a runtime instance check."""
+  if any(not isinstance(aval, (core.ShapedArray, state.AbstractRef)) for aval in avals):
+    raise ValueError(f"Expected ShapedArray; got {[type(aval) for aval in avals]}")
+  return tuple(cast(core.ShapedArray | state.AbstractRef, aval) for aval in avals)

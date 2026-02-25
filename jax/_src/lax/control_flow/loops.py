@@ -48,6 +48,7 @@ from jax._src.interpreters import pxla
 from jax._src import sharding_impls as sharding
 from jax._src.mesh import use_abstract_mesh
 from jax._src.lax import lax
+from jax._src.lax import utils as lax_utils
 from jax._src.lax import slicing
 from jax._src.lax import windowed_reductions
 from jax._src.lax.control_flow.common import (
@@ -346,9 +347,10 @@ def _infer_scan_length(
       msg.format(', '.join(str(x) for x in xs_flat
                            if not hasattr(x, 'shape')))) from err
 
-  if not all(a.sharding.spec[0] is None for a in xs_avals):
+  xs_shaped_avals = lax_utils.ensure_shaped(*xs_avals)
+  if not all(a.sharding.spec[0] is None for a in xs_shaped_avals):
     raise ValueError('0th dimension of all xs should be replicated. Got '
-                     f'{", ".join(str(a.sharding.spec) for a in xs_avals)}')
+                     f'{", ".join(str(a.sharding.spec) for a in xs_shaped_avals)}')
 
   if length is not None:
     try:

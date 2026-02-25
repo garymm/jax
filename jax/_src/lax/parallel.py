@@ -1433,7 +1433,9 @@ def _all_to_all_effectful_abstract_eval(
     input_aval, axis_name, split_axis, concat_axis, axis_index_groups, tiled
 ):
   del tiled  # expand_dims and squeeze is done in `all_to_all` if `True`
-  if not isinstance(axis_name, (list, tuple)):
+  if isinstance(axis_name, list):
+    axis_name = tuple(axis_name)
+  elif not isinstance(axis_name, tuple):
     axis_name = (axis_name,)
   _check_axis_names(axis_name, 'all_to_all')
   check_unreduced_args([input_aval], axis_name, 'all_to_all')
