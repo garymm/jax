@@ -142,6 +142,7 @@ def make_c_api_client(
     distributed_client: _xla.DistributedRuntimeClient | None = None,
     transfer_server_factory: _xla.TransferServerInterfaceFactory | None = None,
     force_dcn_cross_host_transfers: bool = False,
+    sort_devices_by_process_index: bool = True,
 ):
   """Creates a PJRT C API client for a PJRT plugin.
 
@@ -164,6 +165,7 @@ def make_c_api_client(
       distributed_client,
       transfer_server_factory,
       force_dcn_cross_host_transfers,
+      sort_devices_by_process_index,
   )
 
 

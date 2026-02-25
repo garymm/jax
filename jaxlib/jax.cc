@@ -416,7 +416,8 @@ NB_MODULE(_jax, m) {
          std::shared_ptr<xla::DistributedRuntimeClient> distributed_client,
          std::optional<xla::ifrt::TransferServerInterfaceFactory>
              transfer_server_factory,
-         bool force_dcn_cross_host_transfers) -> nb_class_ptr<PyClient> {
+         bool force_dcn_cross_host_transfers,
+         bool sort_devices_by_process_index) -> nb_class_ptr<PyClient> {
         std::unique_ptr<xla::ifrt::PjRtClient> ifrt_client;
         {
           nb::gil_scoped_release gil_release;
@@ -440,6 +441,8 @@ NB_MODULE(_jax, m) {
           }
           ifrt_options.force_dcn_cross_host_transfers =
               force_dcn_cross_host_transfers;
+          ifrt_options.sort_devices_by_process_index =
+              sort_devices_by_process_index;
           ifrt_client = xla::ValueOrThrow(
               xla::ifrt::PjRtClient::Create(std::move(ifrt_options)));
         }
@@ -450,7 +453,8 @@ NB_MODULE(_jax, m) {
           absl::flat_hash_map<std::string, xla::PjRtValueType>(),
       nb::arg("distributed_client").none() = nullptr,
       nb::arg("transfer_server_factory").none() = std::nullopt,
-      nb::arg("force_dcn_cross_host_transfers") = false);
+      nb::arg("force_dcn_cross_host_transfers") = false,
+      nb::arg("sort_devices_by_process_index") = true);
   // TODO(b/322357665): Delete this method after TPU plugin changes to use the
   // standard registration.
   m.def("get_default_c_api_topology",
