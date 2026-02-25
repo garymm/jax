@@ -167,6 +167,7 @@ class CustomCallBackendConfig:
   internal_scratch_in_bytes: int | None
   output_memory_spaces: tuple[MemorySpace | None, ...] | None
   disable_bounds_checks: bool
+  disable_semaphore_checks: bool
   active_core_count: int | None
   input_memory_spaces: tuple[MemorySpace | None, ...] | None
   skip_device_barrier: bool
@@ -272,6 +273,9 @@ class CustomCallBackendConfig:
     if self.disable_bounds_checks:
       config.write(b', "disable_bounds_checks": ')
       config.write(str(self.disable_bounds_checks).lower().encode("ascii"))
+    if self.disable_semaphore_checks:
+      config.write(b', "disable_semaphore_checks": ')
+      config.write(str(self.disable_semaphore_checks).lower().encode("ascii"))
     if self.skip_device_barrier:
       config.write(b', "skip_device_barrier": ')
       config.write(str(self.skip_device_barrier).lower().encode("ascii"))
@@ -564,6 +568,7 @@ def _lower_to_custom_call_config(
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     ir_version: int | None = None,
     disable_bounds_checks: bool = False,
+    disable_semaphore_checks: bool = False,
     input_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     skip_device_barrier: bool = False,
     allow_collective_id_without_custom_barrier: bool = False,
@@ -599,6 +604,7 @@ def _lower_to_custom_call_config(
       needs_layout_passes=needs_layout_passes,
       output_memory_spaces=output_memory_spaces,
       disable_bounds_checks=disable_bounds_checks,
+      disable_semaphore_checks=disable_semaphore_checks,
       active_core_count=active_core_count,
       input_memory_spaces=input_memory_spaces,
       skip_device_barrier=skip_device_barrier,
@@ -625,6 +631,7 @@ def _lowered_to_custom_call_config(
     device_type: str | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     disable_bounds_checks: bool = False,
+    disable_semaphore_checks: bool = False,
     active_core_count: int | None = None,
     input_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     skip_device_barrier: bool = False,
@@ -666,6 +673,7 @@ def _lowered_to_custom_call_config(
       internal_scratch_in_bytes,
       output_memory_spaces,
       disable_bounds_checks,
+      disable_semaphore_checks,
       active_core_count=active_core_count,
       input_memory_spaces=input_memory_spaces,
       skip_device_barrier=skip_device_barrier,
@@ -691,6 +699,7 @@ def lower_module_to_custom_call(
     serialization_format: int | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None,
     disable_bounds_checks: bool = False,
+    disable_semaphore_checks: bool = False,
     input_memory_spaces: tuple[MemorySpace | None, ...] | None,
     metadata: Any | None = None,
     skip_device_barrier: bool = False,
@@ -717,6 +726,7 @@ def lower_module_to_custom_call(
       output_memory_spaces=output_memory_spaces,
       ir_version=get_ir_version(ctx),
       disable_bounds_checks=disable_bounds_checks,
+      disable_semaphore_checks=disable_semaphore_checks,
       input_memory_spaces=input_memory_spaces,
       skip_device_barrier=skip_device_barrier,
       allow_collective_id_without_custom_barrier=allow_collective_id_without_custom_barrier,
@@ -752,6 +762,7 @@ def as_tpu_kernel(
     serialization_format: int | None = 1,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     disable_bounds_checks: bool = False,
+    disable_semaphore_checks: bool = False,
     input_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     shape_invariant_numerics: bool = False,
     needs_layout_passes: bool | None = None,
@@ -771,6 +782,7 @@ def as_tpu_kernel(
       serialization_format=serialization_format,
       output_memory_spaces=output_memory_spaces,
       disable_bounds_checks=disable_bounds_checks,
+      disable_semaphore_checks=disable_semaphore_checks,
       input_memory_spaces=input_memory_spaces,
       shape_invariant_numerics=shape_invariant_numerics,
       needs_layout_passes=needs_layout_passes,
@@ -806,6 +818,7 @@ def lowered_as_tpu_kernel(
     serialization_format: int | None = None,
     internal_scratch_in_bytes: int | None = None,
     disable_bounds_checks: bool = False,
+    disable_semaphore_checks: bool = False,
     metadata: Any | None = None,
     allow_collective_id_without_custom_barrier: bool = False,
 ) -> Callable[..., Any]:
@@ -834,6 +847,7 @@ def lowered_as_tpu_kernel(
       needs_hlo_passes=needs_hlo_passes,
       needs_layout_passes=needs_layout_passes,
       disable_bounds_checks=disable_bounds_checks,
+      disable_semaphore_checks=disable_semaphore_checks,
       allow_collective_id_without_custom_barrier=allow_collective_id_without_custom_barrier,
   )
   return _as_jax_callable(
