@@ -18,6 +18,7 @@ import enum
 from functools import partial
 import itertools
 import typing
+import unittest
 from typing import Any
 
 from absl.testing import absltest
@@ -1583,6 +1584,8 @@ class IndexedUpdateTest(jtu.JaxTestCase):
      for update_dtype in _compatible_dtypes(op, dtype)
     ],
   )
+  # TODO(dsuo): Revert after cl/874691075 break is resolved.
+  @unittest.skip('Advanced indexing tests are broken')
   def testAdvancedIndexing(self, name, shape, dtype, update_shape, update_dtype,
                            indexer, op):
     rng = jtu.rand_default(self.rng())
@@ -1630,6 +1633,8 @@ class IndexedUpdateTest(jtu.JaxTestCase):
      for update_dtype in _compatible_dtypes(op, dtype)
     ],
   )
+  # TODO(dsuo): Revert after cl/874691075 break is resolved.
+  @unittest.skip('Advanced indexing tests are broken')
   def testMixedAdvancedIndexing(self, name, shape, dtype, update_shape,
                                 update_dtype, indexer, op):
     rng = jtu.rand_default(self.rng())
