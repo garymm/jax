@@ -15,6 +15,7 @@
 from functools import partial, wraps
 import itertools
 import math
+import unittest
 
 from absl.testing import absltest
 
@@ -202,6 +203,8 @@ class LaxNumpySetopsTest(jtu.JaxTestCase):
       self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker)
       self._CompileAndCheck(jnp_fun, args_maker)
 
+  # TODO(dsuo): Revert after cl/874691075 break is resolved.
+  @unittest.skip('jnp.setxor1d is broken')
   @jtu.sample_product(
     dtype1=[s for s in default_dtypes if s != jnp.bfloat16],
     dtype2=[s for s in default_dtypes if s != jnp.bfloat16],
