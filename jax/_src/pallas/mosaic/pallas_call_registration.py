@@ -69,13 +69,13 @@ def _get_memory_space_from_aval(
 ) -> tpu_custom_call.MemorySpace | None:
   if not isinstance(out_aval, jax_core.ShapedArray):
     raise ValueError("Memory spaces not defined for non-ShapedArrays")
-  if not isinstance(out_aval, pallas_core.ShapedArrayWithMemorySpace):
-    # If we are passed a regular old ShapedArray, we don't constrain the
-    # memory space
-    return None
+  if not isinstance(
+      ms := getattr(out_aval, "memory_space", None), tpu_core.MemorySpace
+  ):
+    return None  # If we are passed a non-TPU memory space, ignore it.
   # If we are passed an aval with an explicit memory space tag, we use it
   # to constrain the memory space.
-  match out_aval.memory_space:
+  match ms:
     case tpu_core.MemorySpace.HBM:
       return tpu_custom_call.MemorySpace.HBM
     case tpu_core.MemorySpace.VMEM:
@@ -142,19 +142,33 @@ def _resolve_memory_spaces(
       modified = False
       for in_idx, out_idx in input_output_aliases:
         if (ms := input_memory_spaces[in_idx]) is not None:
+          if (out_ms := output_memory_spaces_list[out_idx]) not in (None, ms):
+            raise ValueError(
+                f"In/out memory space conflict for alias {in_idx}->{out_idx}:"
+                f" {ms} != {out_ms}"
+            )
           output_memory_spaces_list[out_idx] = ms
           modified = True
       if modified:
         output_memory_spaces = tuple(output_memory_spaces_list)
-  if input_memory_spaces is None and output_memory_spaces is not None:
-    input_memory_spaces_list: list[tpu_custom_call.MemorySpace | None] = [
-        None,
-    ] * len(in_avals)
-    for input_output_alias in input_output_aliases:
-      input_memory_spaces_list[input_output_alias[0]] = output_memory_spaces[
-          input_output_alias[1]
-      ]
-    input_memory_spaces = tuple(input_memory_spaces_list)
+  if output_memory_spaces is not None:
+    input_memory_spaces_list: list[tpu_custom_call.MemorySpace | None]
+    if input_memory_spaces is None:
+      input_memory_spaces_list = [None] * len(in_avals)
+    else:
+      input_memory_spaces_list = list(input_memory_spaces)
+    modified = False
+    for in_idx, out_idx in input_output_aliases:
+      if (ms := output_memory_spaces[out_idx]) is not None:
+        if (in_ms := input_memory_spaces_list[in_idx]) not in (None, ms):
+          raise ValueError(
+              f"In/out memory space conflict for alias {in_idx}->{out_idx}:"
+              f"{in_ms} != {ms}"
+          )
+        input_memory_spaces_list[in_idx] = ms
+        modified = True
+    if modified:
+      input_memory_spaces = tuple(input_memory_spaces_list)
   if input_memory_spaces is not None:
     input_memory_spaces = tuple(
         i

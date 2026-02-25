@@ -2234,6 +2234,46 @@ class PallasSparsecoreAsyncTest(PallasSCTest):
     o = jax.block_until_ready(foo(x))
     np.testing.assert_array_equal(o, x)
 
+  def test_memory_space_annotations_aliased_input_core_map(self):
+    @jax.jit
+    def f(x, y):
+      mesh =  plsc.ScalarSubcoreMesh(axis_name='core', num_cores=1)
+      x_ref = jax.new_ref(x, memory_space=pltpu.HBM)
+      y_ref = jax.new_ref(y, memory_space=pltpu.HBM)
+      index_ref = jax.new_ref(
+          jnp.zeros([8], jnp.int32), memory_space=pltpu.SMEM
+      )
+      sem = pl.kernel(
+          lambda *_: None,
+          out_shape=pltpu.SemaphoreType.DMA(()),
+          mesh=mesh,
+          name="sem_alloc",
+      )()
+      sem_ref = jax.new_ref(sem, memory_space=pltpu.SEMAPHORE)
+
+      @pl.core_map(mesh)
+      def dma1():
+        pltpu.async_copy(x_ref.at[index_ref[0]], y_ref, sem_ref).wait()
+      index_ref[0] += 1  # TODO(b/487587946): unable to put this inside dma1
+
+      y1 = jax.freeze(y_ref)
+      y_ref = jax.new_ref(y1)
+
+      @pl.core_map(mesh)
+      def dma2():
+        pltpu.async_copy(x_ref.at[index_ref[0]], y_ref, sem_ref).wait()
+
+      y2 = jax.freeze(y_ref)
+      # Transpose tests jnp op on result of core_map, verifying we don't leak
+      # ShapedArrayWithMemorySpace.
+      return y1.T, y2.T
+
+    x = jnp.arange(2 * 8 * 128.0).reshape(2, 8, 128)
+    y = -x[0]
+    y1, y2 = f(x, y)
+    np.testing.assert_array_equal(y1, x[0].T)
+    np.testing.assert_array_equal(y2, x[1].T)
+
 
 class PallasSparsecoreAsyncTestWithTCTiling(PallasSparsecoreAsyncTest):
   USE_TC_TILING = True
