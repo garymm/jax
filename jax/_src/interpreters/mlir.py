@@ -2459,7 +2459,7 @@ def lower_fun(fun: Callable, multiple_results: bool = True) -> Callable:
         debug_info=api_util.debug_info("lower_fun", fun, args, {}))
 
     jaxpr, _, consts_for_constvars = pe.trace_to_jaxpr_dynamic(
-        wrapped_fun, ctx.avals_in)
+        wrapped_fun, ctx.avals_in, lower=True)
 
     if any(isinstance(e, core.InternalMutableArrayEffect) for e in jaxpr.effects):
       from jax._src.interpreters import pxla  # type: ignore
