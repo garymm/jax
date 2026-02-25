@@ -704,17 +704,6 @@ def new_eqn_recipe(trace: JaxprTrace,
                         out_avals, primitive, params, effects, source_info,
                         ctx)
 
-
-def recipe_to_eqn(getvar: Callable[[JaxprTracer], Atom],
-                  recipe: JaxprEqnRecipe) -> core.JaxprEqn:
-  (_, in_tracers, out_tracer_refs, out_avals, prim, params, eff, src,
-   ctx) = recipe
-  invars  = [getvar(t) for t in in_tracers]
-  out_tracers = [t_ref() for t_ref in out_tracer_refs]
-  outvars = [DropVar(a) if t is None else getvar(t)
-             for a, t in zip(out_avals, out_tracers)]
-  return new_jaxpr_eqn(invars, outvars, prim, params, eff, src, ctx)
-
 def tracers_to_jaxpr(
   in_tracers: Sequence[JaxprTracer],
   out_tracers: Sequence[JaxprTracer],
@@ -845,16 +834,6 @@ def convert_invars_to_constvars(jaxpr: Jaxpr, n: int) -> Jaxpr:
                                debug_info=dbg)
   config.enable_checks.value and core.check_jaxpr(lifted_jaxpr)
   return lifted_jaxpr
-
-def convert_envvars_to_constvars(jaxpr: Jaxpr, num_env_vars: int) -> Jaxpr:
-  if any(isinstance(eff, effects.JaxprInputEffect) for eff in jaxpr.effects):
-    raise NotImplementedError
-  config.enable_checks.value and core.check_jaxpr(jaxpr)
-  env_vars, invars = split_list(jaxpr.invars, [num_env_vars])
-  converted_jaxpr = jaxpr.replace(constvars=jaxpr.constvars + env_vars,
-                                  invars=invars)
-  config.enable_checks.value and core.check_jaxpr(converted_jaxpr)
-  return converted_jaxpr
 
 
 def partial_eval_jaxpr_nounits(
@@ -1212,13 +1191,6 @@ PartialEvalCustomRule = Callable[
     [Callable[..., RematCases_], Sequence[bool], Sequence[bool], JaxprEqn],
     PartialEvalCustomResult]
 partial_eval_jaxpr_custom_rules: dict[Primitive, PartialEvalCustomRule] = {}
-
-def partial_eval_jaxpr_custom_rule_not_implemented(
-    name: str, saveable: Callable[..., RematCases_], unks_in: Sequence[bool],
-    inst_in: Sequence[bool], eqn: JaxprEqn) -> PartialEvalCustomResult:
-  msg = (f'custom-policy remat rule not implemented for {name}, '
-         'open a feature request at https://github.com/jax-ml/jax/issues!')
-  raise NotImplementedError(msg)
 
 
 ParamsUpdater = Callable[[Sequence[bool], Sequence[bool], Sequence[bool],
@@ -2548,11 +2520,6 @@ class TracerAsName:
 Const = Any
 Val = Any
 
-def instantiate_const_at(trace: JaxprTrace, instantiate: bool, tracer):
-  if instantiate:
-    return trace.instantiate_const(tracer)
-  else:
-    return tracer
 
 def inline_jaxpr_into_trace(
     trace: DynamicJaxprTrace, src: SourceInfo, jaxpr: Jaxpr,

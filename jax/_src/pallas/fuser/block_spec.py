@@ -68,9 +68,6 @@ class PullRuleContext:
   scalar_prefetch_handler: Any | None
   grid_len: int | None
 
-  def __post_init__(self):
-    self._scalar_prefetch = None
-
   def set_eval_function(self, eval_function):
     self.eval_function = eval_function
     return eval_function

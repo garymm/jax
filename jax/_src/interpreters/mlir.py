@@ -931,18 +931,6 @@ def flatten_ir_types(xs: Iterable[IrTypes]) -> list[ir.Type]:
 
 _unflatten_done = object()
 
-def unflatten_ir_types(xs: Iterable[ir.Type], ns: Sequence[int]) -> list[IrTypes]:
-  """Splits `xs` into subsequences of lengths `ns`.
-
-  Unlike `split_list`, the `sum(ns)` must be equal to `len(xs)`, and if n == 1
-  then types are not wrapped in a singleton list."""
-  xs_iter = iter(xs)
-  unflattened: list[IrTypes]
-  unflattened = [next(xs_iter) if n == 1 else tuple(next(xs_iter)
-                 for _ in range(n)) for n in ns]
-  assert next(xs_iter, _unflatten_done) is _unflatten_done
-  return unflattened
-
 def len_ir_types(x: IrTypes) -> int:
   return 1 if isinstance(x, ir.Type) else len(x)
 

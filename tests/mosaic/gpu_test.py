@@ -93,14 +93,6 @@ def nd_loop(bounds, body, *, _idxs = ()):
     return ()
 
 
-def mlir_sum(elems):
-  assert elems
-  total = elems[0]
-  for elem in elems[1:]:
-    total = arith.addi(total, elem)
-  return total
-
-
 def copy(src: ir.Value, dst: ir.Value, swizzle: int | None = None):
   index = ir.IndexType.get()
   thread_id = gpu.thread_id(gpu.Dimension.x)

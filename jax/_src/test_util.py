@@ -242,7 +242,6 @@ class EventThreadLocalState(threading.local):
     self.nested_device_put_count = 0  # Number of recursive calls to device_put
 
     # Per-function counts
-    self.infer_params_fun_counts = None
     self.lower_jaxpr_to_fun_counts = None
 
     self.collect_lowered_jaxprs = None

@@ -28,13 +28,13 @@ from jax._src import linear_util as lu
 from jax._src.partition_spec import PartitionSpec as P
 from jax._src import mesh as mesh_lib
 from jax._src.ad_util import Zero, SymbolicZero, add_jaxvals, add_jaxvals_p
-from jax._src.core import Trace, Tracer, TraceTag, AxisName
+from jax._src.core import Trace, Tracer, TraceTag
 from jax._src.interpreters import partial_eval as pe
 from jax._src.tree_util import (tree_unflatten, tree_flatten, PyTreeDef)
 from jax._src.typing import Array
 from jax._src.util import (unzip2, safe_map, safe_zip, split_list,
                            canonicalize_axis, moveaxis, as_hashable_function,
-                           curry, memoize, weakref_lru_cache, tuple_insert)
+                           memoize, weakref_lru_cache, tuple_insert)
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -393,39 +393,6 @@ def _batch_inner(f: Callable, axis_data, out_dim_dests, sum_match, tag, in_dims,
           map(partial(from_elt, trace, axis_data.size, axis_data.explicit_mesh_axis, sum_match),  # pyrefly: ignore[no-matching-overload]  # pyrefly#2385
               range(len(outs)), outs, out_dim_dests))
   return out_vals, out_dim_srcs, trace
-
-# NOTE: This divides the in_axes by the tile_size and multiplies the out_axes by it.
-def vtile(f_flat: lu.WrappedFun,
-          in_axes_flat: tuple[int | None, ...],
-          out_axes_flat: tuple[int | None, ...],
-          tile_size: int | None,
-          axis_name: AxisName):
-  @curry
-  def tile_axis(arg, axis: int | None, tile_size):
-    if axis is None:
-      return arg
-    shape = list(arg.shape)
-    shape[axis:axis+1] = [tile_size, shape[axis] // tile_size]
-    return arg.reshape(shape)
-
-  def untile_axis(out, axis: int | None):
-    if axis is None:
-      return out
-    shape = list(out.shape)
-    # pyrefly: ignore[unsupported-operation]  # pyrefly#2529
-    shape[axis:axis+2] = [shape[axis] * shape[axis+1]]
-    return out.reshape(shape)
-
-  @lu.transformation2
-  def _map_to_tile(f, *args_flat):
-    sizes = (x.shape[i] for x, i in safe_zip(args_flat, in_axes_flat) if i is not None)
-    tile_size_ = tile_size or next(sizes, None)
-    assert tile_size_ is not None, "No mapped arguments?"
-    outputs_flat = f(*map(tile_axis(tile_size=tile_size_), args_flat, in_axes_flat))
-    return map(untile_axis, outputs_flat, out_axes_flat)
-
-  axis_data = AxisData(axis_name, tile_size, None, None)
-  return _map_to_tile(batch(f_flat, axis_data, in_axes_flat, out_axes_flat))
 
 ### API for batching functions with jaxpr type inputs and outputs
 
