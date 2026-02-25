@@ -37,7 +37,8 @@ from jax._src import source_info_util
 from jax._src import state
 from jax._src import util
 from jax._src.api_util import (
-    check_no_aliased_ref_args, _check_no_aliased_closed_over_refs)
+    check_no_aliased_ref_args, _check_no_aliased_closed_over_refs,
+    check_no_transformed_refs_args)
 from jax._src.core import (
   ShapedArray, typeof, cur_qdd, ClosedJaxpr, AbstractValue)
 from jax._src.interpreters import ad
@@ -207,6 +208,7 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
   init_flat = FlatTree.flatten(init)
   xs_flat = FlatTree.flatten(xs)
   args = FlatTree.pack((init_flat, xs_flat))
+  check_no_transformed_refs_args(lambda: dbg_body, args.vals)
   del init, xs
 
   args_avals = args.map(core.get_aval)
@@ -1498,6 +1500,7 @@ def while_loop(cond_fun: Callable[[T], BooleanNumeric],
   cond_dbg = api_util.debug_info("while_cond", cond_fun, (init_val,), {})
   body_dbg = api_util.debug_info("while_body", body_fun, (init_val,), {})
   init_val_flat = FlatTree.flatten(init_val)
+  check_no_transformed_refs_args(lambda: body_dbg, init_val_flat.vals)
   del init_val
   init_aval = init_val_flat.map(core.get_aval)
 

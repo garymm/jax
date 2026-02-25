@@ -1409,6 +1409,75 @@ class StateControlFlowTest(jtu.JaxTestCase):
     out = f(4.)
     np.testing.assert_array_equal(out, jnp.exp(4.))
 
+  def test_transformed_ref_is_a_pytree_node(self):
+    @jax.jit
+    def fn():
+      x_ref = jax.new_ref(jnp.zeros(7))
+      x_ref_view = x_ref.at[1:6]
+      def assert_fn(x):  # ensure TransformedRef is still a node
+        self.assertNotIsInstance(x, jax.Array)
+        self.assertIsInstance(x, state_types.TransformedRef)
+      jax.tree.map(assert_fn, x_ref_view)
+    fn()
+
+  @parameterized.named_parameters(
+    ("scan", "scan"), ("while_loop", "while_loop"))
+  def test_transformed_ref_in(self, transform):
+    def scan_by_closing_over_fn(fn):
+      return lambda *args: jax.lax.scan(lambda _, __: (fn(*args), ()), None, (),
+                                        length=1)[0]
+    def while_loop_by_closing_over(fn):
+      return lambda *args: jax.lax.while_loop(
+        lambda i: i < 1, lambda i: (fn(*args), i + 1)[1], 0)
+    transform = {"scan": scan_by_closing_over_fn,
+                 "while_loop": while_loop_by_closing_over}[transform]
+    @jax.jit
+    def f():
+      x_ref = jax.new_ref(jnp.zeros(7))
+      x_ref_view = x_ref.at[1:6]
+      @transform
+      def inner(x_ref_view):
+        x_ref_view[...] += 17 * jnp.ones((5,))
+      inner(x_ref_view)
+      return x_ref[...]
+    expected = jnp.zeros(7).at[1:6].add(17.0)
+    self.assertAllClose(f(), expected)
+
+  @parameterized.named_parameters(
+    ("vmap", "vmap"), ("jit", "jit"), ("remat", "remat"), ("scan", "scan"),
+    ("while_loop", "while_loop"), ("cond", "cond"), ("shard_map", "shard_map"))
+  def test_no_transformed_ref_in(self, transform):
+    def scan_fn(fn):
+      return lambda *args: jax.lax.scan(
+        lambda _, ref_slices_maybe: (fn(*ref_slices_maybe), ()), None, args,
+        length=1)[0]
+    def while_loop_fn(fn):
+      return lambda *args: jax.lax.while_loop(
+        lambda _: False, lambda ref_slices_maybe: fn(*ref_slices_maybe), args)
+    def cond_fn(fn):
+      return lambda *args: jax.lax.cond(True, fn, fn, *args)
+    def shard_map(fn):
+      mesh = jax.make_mesh((1,), ("x",),
+                           axis_types=jax.sharding.AxisType.Explicit)
+      def fn_(*args):
+        return jax.shard_map(
+          fn, mesh=mesh, in_specs=jax.P(), out_specs=jax.P())(*args)
+      return fn_
+    transform = {"jit": jax.jit, "vmap": jax.vmap, "remat": jax.remat,
+                 "scan": scan_fn, "while_loop": while_loop_fn, "cond": cond_fn,
+                 "shard_map": shard_map}[transform]
+    @jax.jit
+    def f():
+      x_ref = jax.new_ref(jnp.zeros(7))
+      x_ref_view = x_ref.at[1:6]
+      @transform
+      def inner(x_ref_view):
+        x_ref_view[...] += jnp.ones_like(x_ref_view)
+      inner(x_ref_view)
+      return x_ref[...]
+    with self.assertRaisesRegex(TypeError, "TransformedRefs are not allowed"):
+      f()
+
 class GeneralRefTest(jtu.JaxTestCase):
 
   def test_token(self):

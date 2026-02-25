@@ -248,9 +248,10 @@ def _shard_map(f: F, *, mesh: Mesh | AbstractMesh | None,
     nonlocal mesh, axis_names
     mesh, axis_names = _shmap_checks(
         mesh, axis_names, in_specs, out_specs, _smap)
-    fun = lu.wrap_init(
-        f, debug_info=api_util.debug_info("shard_map", f, args, {}))
+    dbg = api_util.debug_info("shard_map", f, args, {})
+    fun = lu.wrap_init(f, debug_info=dbg)
     args_flat, in_tree = tree_flatten(args)
+    api_util.check_no_transformed_refs_args(lambda: dbg, args_flat)
     fun, out_specs_thunk = _broadcast_out_specs(fun, out_specs, axis_names)
     fun, out_tree = api_util.flatten_fun_nokwargs(fun, in_tree)
 

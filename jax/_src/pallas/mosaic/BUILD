@@ -178,6 +178,7 @@ pytype_strict_library(
         ":sc_core",
         ":sc_lowering",
         "//jax",
+        "//jax/_src:api_util",
         "//jax/_src:core",
         "//jax/_src:dtypes",
         "//jax/_src:effects",

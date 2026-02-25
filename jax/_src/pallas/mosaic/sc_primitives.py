@@ -16,7 +16,7 @@
 from collections.abc import Callable, Sequence
 import enum
 import functools
-from typing import TypeAlias, TypeVar, overload
+from typing import overload, TypeAlias, TypeVar
 
 import jax
 from jax import api_util
@@ -25,6 +25,7 @@ from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import effects
 from jax._src import linear_util as lu
+from jax._src.api_util import check_no_transformed_refs_args
 from jax._src.interpreters import partial_eval as pe
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
@@ -892,18 +893,15 @@ def parallel_loop(lower, upper, step=1, *, unroll=1, carry=None):
             f" {result_tree} != {carry_tree}"
         )
       return result
+
     flat_avals = [
         pallas_core.index_map_grid_aval,
         *(c.aval for c in flat_carries),
     ]
+    debug_info = api_util.debug_info("parallel_loop", body, flat_avals, {})
+    check_no_transformed_refs_args(lambda: debug_info, flat_carries)
     jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
-        lu.wrap_init(
-            wrapped,
-            debug_info=api_util.debug_info(
-                "parallel_loop", body, flat_avals, {}
-            ),
-        ),
-        flat_avals,
+        lu.wrap_init(wrapped, debug_info=debug_info), flat_avals
     )
     carry_tree.unflatten(jaxpr.outvars)  # Verify same structure.
     disallowed_effects = effects.control_flow_allowed_effects.filter_not_in(

@@ -376,6 +376,7 @@ def checkpoint(fun: Callable, *, prevent_cse: bool | Sequence[bool] = True,
         args, kwargs, static_argnums=static_argnums)
     fun_, args = _remat_static_argnums(fun, static_argnums, args)
     args_flat, in_tree = tree_flatten((args, kwargs))
+    api_util.check_no_transformed_refs_args(lambda: debug, args_flat)
     in_avals = [core.shaped_abstractify(x) for x in args_flat]
     jaxpr, consts, out_tree = _trace_to_jaxpr(fun_, in_tree, tuple(in_avals), debug)
     if isinstance(prevent_cse, tuple):

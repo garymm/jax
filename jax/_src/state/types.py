@@ -317,8 +317,16 @@ class TransformedRef:
     return ref_get(self, slc)
 
   def __setitem__(self, slc, value):
-    from jax._src.state.primitives import ref_set # pytype: disable=import-error
+    from jax._src.state.primitives import ref_set  # pytype: disable=import-error
     return ref_set(self, slc, value)
+
+class TransformedRefAvalError(Exception):
+  pass
+
+def disallow_transformed_ref_avals(_):
+  raise TransformedRefAvalError("TransformedRefs cannot be abstractified.")
+
+core.pytype_aval_mappings[TransformedRef] = disallow_transformed_ref_avals
 
 
 def transform_type(
