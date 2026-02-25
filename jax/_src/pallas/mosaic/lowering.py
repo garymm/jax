@@ -97,7 +97,7 @@ MLIR_DYNAMIC = -9223372036854775808
 
 # TODO(mvoz): Find a way to make this a contract we can share with the
 # export specialization step in XLA export.
-DIM_UPPER_BOUND = np.iinfo(np.int32).max  # pyrefly: ignore[no-matching-overload]  # pyrefly#2398
+DIM_UPPER_BOUND = np.iinfo(np.int32).max
 DIM_LOWER_BOUND = -128
 
 partial = functools.partial
@@ -2041,7 +2041,7 @@ REDUCE_MAX_KINDS = {
 }
 REDUCE_MAX_IDENTITY = {
     jnp.floating: float("-inf"),
-    jnp.signedinteger: np.iinfo(np.int32).min,  # pyrefly: ignore[no-matching-overload]  # pyrefly#2398
+    jnp.signedinteger: np.iinfo(np.int32).min,
 }
 _reduce_max_lowering_rule = reduce_lowering_rule(
     jnp.max, REDUCE_MAX_KINDS, REDUCE_MAX_IDENTITY)
@@ -2055,7 +2055,7 @@ REDUCE_MIN_KINDS = {
 }
 REDUCE_MIN_IDENTITY = {
     jnp.floating: float("inf"),
-    jnp.signedinteger: np.iinfo(np.int32).max,  # pyrefly: ignore[no-matching-overload]  # pyrefly#2398
+    jnp.signedinteger: np.iinfo(np.int32).max,
 }
 _reduce_min_lowering_rule = reduce_lowering_rule(
     jnp.min, REDUCE_MIN_KINDS, REDUCE_MIN_IDENTITY)

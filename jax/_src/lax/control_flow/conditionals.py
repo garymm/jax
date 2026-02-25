@@ -840,7 +840,7 @@ def _cond_transpose_fancy(cts_in, index, *args, branches, **params):
   primals_ctrefs, specs = ad.project_accums(args)
   in_flat, in_tree = tree_flatten((primals_ctrefs, cts_in))
   in_avals = tuple(core.AvalQDD(a, cur_qdd(x)) if (a := typeof(x)).has_qdd  # type: ignore
-                   else a for x in in_flat)  # pyrefly: ignore[unbound-name]  # pyrefly#2382
+                   else a for x in in_flat)
   trans_branches, out_trees = unzip2(
       _transpose_jaxpr_fancy(j, in_tree, in_avals, specs, (False,) * len(args))
       for j in branches)
