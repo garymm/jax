@@ -18,6 +18,7 @@ import jax
 from jax._src import test_util as jtu
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
 
 
@@ -58,12 +59,41 @@ class TraceMetricTest(jtu.JaxTestCase):
     )(x, s)
 
     # Just verify the kernel runs and produces correct output
-    # TODO(amuzio): Verify the kernel runs and includes the vtrace in an actual
-    # xprof.
     self.assertEqual(result.shape, (8, 128))
     self.assertTrue(
         jnp.allclose(result, x + 48.0 + s.astype(jnp.float32).reshape((1, 1)))
     )
+
+
+class SparseCoreTraceValueTest(jtu.JaxTestCase):
+
+  def setUp(self):
+    super().setUp()
+    if not jtu.is_device_tpu(5, "p") and not jtu.is_device_tpu_at_least(6):
+      self.skipTest("SparseCore only supported on TPU v5p+")
+    if not jtu.is_cloud_tpu_at_least(2026, 3, 1):
+      self.skipTest("Requires a newer libtpu")
+
+  def test_trace_value(self):
+    nl = plsc.get_sparse_core_info().num_lanes
+    x = jnp.arange(8 * 128, dtype=jnp.int32).reshape(8, 128)
+    mesh = plsc.VectorSubcoreMesh(
+        core_axis_name="core", subcore_axis_name="subcore", num_cores=1
+    )
+
+    @pl.kernel(
+        out_shape=x,
+        mesh=mesh,
+        scratch_shapes=(pltpu.VMEM(x.shape, x.dtype),),
+        compiler_params=pltpu.CompilerParams(),
+    )
+    def kernel(x_hbm_ref, o_hbm_ref, tmp_ref):
+      pltpu.sync_copy(x_hbm_ref, tmp_ref)
+      pltpu.trace_value("sc_trace_value", tmp_ref[1, :nl][1])
+      pltpu.sync_copy(tmp_ref, o_hbm_ref)
+
+    result = kernel(x)
+    self.assertArraysEqual(result, x)
 
 
 if __name__ == "__main__":
