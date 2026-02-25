@@ -1832,6 +1832,8 @@ class OpsTest(PallasBaseTest):
   def test_binary_scalar(self, f, dtype):
     self.skip_if_mosaic_gpu()
 
+    if pltpu is None:
+      self.skipTest("No TPU module available.")
     if jtu.test_device_matches(["tpu"]) and jnp.dtype(dtype).itemsize == 2:
       self.skipTest("16-bit types are not supported on TPU")
 
