@@ -4311,6 +4311,107 @@ class PallasCallTCGen05Test(PallasTCGen05Test):
     ref = x_logical.astype(jnp.float32) @ y.T.astype(jnp.float32)
     np.testing.assert_allclose(z, ref, atol=7e-5, rtol=5e-6)
 
+  @parameterized.product(
+      m=[128],
+      n=[128, 256],
+  )
+  def test_block_scaled_sparse_matmul(self, m, n):
+    self.skip_if_wg_semantics()
+    in_dtype = jnp.float8_e5m2
+    scale_dtype = jnp.float8_e8m0fnu
+    block_size = 64
+    swizzle = 128
+    k = 256
+    transforms = self.default_transforms(swizzle=swizzle, dtype=in_dtype)
+    out_transforms = self.default_transforms(dtype=jnp.float32)
+
+    def kernel(a_smem, b_smem, a_sparse_smem, a_scale_smem, b_scale_smem,
+               out_ref, barrier_ref, acc_tmem, a_sparse_tmem,
+               a_scale_tmem, b_scale_tmem):
+      plgpu.async_copy_sparse_metadata_to_tmem(a_sparse_smem, a_sparse_tmem)
+      plgpu.async_copy_scales_to_tmem(a_scale_smem, a_scale_tmem)
+      plgpu.async_copy_scales_to_tmem(b_scale_smem, b_scale_tmem)
+      plgpu.tcgen05_mma(acc_tmem,
+                        a_smem,
+                        plgpu.transpose_ref(b_smem, (1, 0)),
+                        a_scale=a_scale_tmem,
+                        b_scale=b_scale_tmem,
+                        a_sparse_metadata=a_sparse_tmem,
+                        accumulate=False)
+      plgpu.tcgen05_commit_arrive(barrier_ref)
+      plgpu.barrier_wait(barrier_ref)
+      out_ref[...] = plgpu.async_load_tmem(acc_tmem)
+
+    scratch_shapes = [
+        plgpu.Barrier(orders_tensor_core=True),
+        plgpu.TMEM((m, n), jnp.float32),
+        plgpu.TMEM((m, k // 2), jnp.uint2, layout=plgpu.TMEMLayout.SPARSE_METADATA_LAYOUT),
+        plgpu.TMEM((m, k // block_size), scale_dtype, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
+        plgpu.TMEM((n, k // block_size), scale_dtype, layout=plgpu.TMEMLayout.SCALES_LAYOUT),
+    ]
+
+    f = self.pallas_call(
+        kernel,
+        in_specs=(
+            plgpu.BlockSpec(memory_space=plgpu.SMEM, transforms=transforms),
+            plgpu.BlockSpec(memory_space=plgpu.SMEM, transforms=transforms),
+            plgpu.BlockSpec(memory_space=plgpu.SMEM),
+            plgpu.BlockSpec(memory_space=plgpu.SMEM),
+            plgpu.BlockSpec(memory_space=plgpu.SMEM),
+        ),
+        out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+        out_specs=plgpu.BlockSpec(transforms=out_transforms),
+        scratch_shapes=scratch_shapes,
+    )
+    x = jax.random.uniform(jax.random.key(1), shape=(m, k // 2), dtype=jnp.float32).astype(in_dtype)
+    y = jax.random.uniform(jax.random.key(2), shape=(n, k), dtype=jnp.float32).astype(in_dtype)
+    index_pairs = np.asarray(np.meshgrid(range(4), range(4))).T.reshape(-1, 2)
+    valid_pairs = index_pairs[index_pairs[:, 0] < index_pairs[:, 1]]
+    assert len(valid_pairs) == 6
+    x_pairs = jax.random.randint(jax.random.key(1234), (m, k // 4), 0, 6, dtype=jnp.uint8)
+    x_sparse = valid_pairs[x_pairs]
+    assert x_sparse.shape == (m, k // 4, 2)
+    ksx, ksy = jax.random.split(jax.random.key(5678), 2)
+    x_scale = jax.lax.bitcast_convert_type(
+        jax.random.randint(ksx, (m, k // block_size), 122, 132, dtype=jnp.uint8),
+        scale_dtype
+    )
+    y_scale = jax.lax.bitcast_convert_type(
+        jax.random.randint(ksy, (n, k // block_size), 122, 132, dtype=jnp.uint8),
+        scale_dtype
+    )
+    def format_scales(scales):
+      mn, k = scales.shape
+      assert mn % 128 == 0 and k % 4 == 0
+      return (
+          scales.reshape(mn // 128, 4, 32, k // 4, 4)
+          .transpose(0, 3, 2, 1, 4)
+          .reshape(mn // 128, k // 4, 32, 16)
+      )
+    def format_sparse_meta(meta):
+      mn, k, _2 = meta.shape
+      assert _2 == 2
+      k *= 2
+      return (
+          meta.reshape(mn // 128, 128, k // 64, 64)
+          .transpose(0, 2, 1, 3)
+          .astype(jnp.uint2)
+      )
+    z = f(
+        x, y,
+        format_sparse_meta(x_sparse),
+        format_scales(x_scale), format_scales(y_scale),
+    )
+    x_logical = np.zeros_like(x, shape=(m, k // 4, 4))
+    np.put_along_axis(x_logical, x_sparse, x.reshape(x_sparse.shape), axis=-1)
+    x_logical = x_logical.reshape(m, k)
+    x32 = x_logical.astype(np.float32)
+    y32 = y.astype(np.float32)
+    a_logical_scales = jnp.repeat(x_scale, block_size, axis=1).astype(jnp.float32)
+    b_logical_scales = jnp.repeat(y_scale, block_size, axis=1).astype(jnp.float32)
+    ref = (x32 * a_logical_scales) @ (y32 * b_logical_scales).T
+    np.testing.assert_allclose(z, ref, atol=2e-4, rtol=5e-6)
+
   @parameterized.parameters(
       (128, jnp.float16)
   )
