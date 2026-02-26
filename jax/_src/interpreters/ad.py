@@ -91,7 +91,7 @@ def linearize_subtrace(_f: Callable, _store: lu.Store, _is_vjp: bool,
   with core.take_current_trace() as parent_trace:
     tangent_trace = pe.DynamicJaxprTrace(debug_info, auto_dce=True)
     tangent_trace.tag = _tag
-    linearize_trace = LinearizeTrace(parent_trace, tangent_trace, _is_vjp, _tag)
+    linearize_trace = LinearizeTrace(parent_trace, tangent_trace, _is_vjp)
     tracers = [LinearizeTracer(linearize_trace, p,
                                tangent_trace.new_arg(get_aval(p).to_tangent_aval(),
                                                      source_info))
@@ -175,8 +175,8 @@ def _linearize_jaxpr(
   primal_trace = pe.DynamicJaxprTrace(dbg)
   tangent_trace = pe.DynamicJaxprTrace(dbg, auto_dce=True)
   tag = core.TraceTag()
-  lin_trace = LinearizeTrace(primal_trace, tangent_trace, is_vjp=is_vjp, tag=tag)
   tangent_trace.tag = tag
+  lin_trace = LinearizeTrace(primal_trace, tangent_trace, is_vjp=is_vjp)
 
   def new_arg(trace, primal_aval, nz, source_info):
     primal = primal_trace.new_arg(primal_aval, source_info)
@@ -238,12 +238,12 @@ def direct_linearize(traceable, primals, *, has_aux, is_vjp):
   with core.take_current_trace() as parent_trace:
     source_info = source_info_util.current()
     tangent_trace = pe.DynamicJaxprTrace(dbg, auto_dce=True)
-    tangent_trace.tag = tag
     tangents = [tangent_trace.new_arg(get_aval(p).to_tangent_aval(), source_info) for p in primals]
     tangents = [p2tz(t) if not isinstance(t, Zero)
                 and isinstance(typeof(t), core.ShapedArray)
                 and dtype(t) == float0 else t for t in tangents]
-    lin_trace = LinearizeTrace(parent_trace, tangent_trace, is_vjp, tag)
+    tangent_trace.tag = tag
+    lin_trace = LinearizeTrace(parent_trace, tangent_trace, is_vjp)
     tracers = [LinearizeTracer(lin_trace, p, t) for p, t in zip(primals, tangents)]
     tracers = [t.full_lower() for t in tracers]
     with (core.set_current_trace(lin_trace),
@@ -757,15 +757,25 @@ call_transpose_param_updaters: dict[core.Primitive, Callable] = {}
 # -------------------- Linearize trace --------------------
 
 class LinearizeTrace(Trace):
+  parent_trace: core.Trace | None
+  tangent_trace: core.Trace
+  is_jvp: bool
+  requires_low: bool
+  _name_stack_prefix_len: int
 
-  def __init__(self, parent_trace, tangent_trace, is_vjp, tag):
+  def __init__(self, parent_trace, tangent_trace, is_vjp):
     super().__init__()
+    if not hasattr(tangent_trace, "tag"):
+      raise RuntimeError("Internal: LinearizeTrace.__init__ requires tangent_trace.tag to be defined.")
     self.parent_trace = parent_trace
     self.tangent_trace = tangent_trace
     self.is_vjp = is_vjp
-    self.tag = tag
     self.requires_low = False
     self._name_stack_prefix_len = len(source_info_util.current_name_stack())
+
+  @property
+  def tag(self) -> core.TraceTag:
+    return self.tangent_trace.tag
 
   def _name_stack_suffix(self):
     return source_info_util.current_name_stack()[self._name_stack_prefix_len:]
