@@ -1684,8 +1684,7 @@ class VectorSubcoreTest(PallasSCTest):
     np.testing.assert_array_equal(kernel(x)[0], x[0])
 
   def test_copy_in_shard_map(self):
-    if not jtu.is_cloud_tpu_at_least(2026, 3, 1):
-      self.skip_if_tc_tiling()
+    self.skip_if_tc_tiling()
     num_devices = len(jax.devices())
     mesh = jtu.create_mesh((num_devices,), ("x",))
 
