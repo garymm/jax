@@ -14,8 +14,8 @@
 
 from __future__ import annotations
 
-from collections import namedtuple
 import math
+from typing import NamedTuple
 
 import numpy as np
 
@@ -28,7 +28,10 @@ from jax._src.typing import ArrayLike, Array
 from jax._src.util import canonicalize_axis
 
 
-ModeResult = namedtuple('ModeResult', ('mode', 'count'))
+class ModeResult(NamedTuple):
+  mode: Array
+  count: Array   # type: ignore[bad-override, assignment]
+
 
 @api.jit(static_argnames=['axis', 'nan_policy', 'keepdims'])
 def mode(a: ArrayLike, axis: int | None = 0, nan_policy: str = "propagate", keepdims: bool = False) -> ModeResult:
