@@ -417,7 +417,7 @@ class GradAccum:
 
 class RefAccum(GradAccum):
   aval: core.AbstractValue
-  ref: AbstractRef | None
+  ref: Ref | None
 
   def __init__(self, aval, ref=None):
     self.aval = aval

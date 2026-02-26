@@ -726,6 +726,7 @@ def _select_and_scatter_lower(
     window_strides, padding):
   operand_aval, source_aval, init_value_aval = ctx.avals_in
   aval_out, = ctx.avals_out
+  assert isinstance(operand_aval, ShapedArray)
   scalar_aval = operand_aval.update(
       shape=(), sharding=operand_aval.sharding.update(spec=()))
   scalar_type = mlir.aval_to_ir_type(scalar_aval)
@@ -840,9 +841,9 @@ def _select_and_scatter_add_impl(source, operand, *,
   dtype = source.dtype
   select = lambda x, y: select_prim.bind(x, y)
   scatter = lax.bitwise_or if dtype == np.bool_ else lax.add
+  original_padding = padding
+  operand_shape = operand.shape
   if expand_padding:
-    operand_shape = operand.shape
-    original_padding = padding
     identity = (lax._get_max_identity if select_prim is lax.ge_p
                 else lax._get_min_identity)
     pads = [(lo, hi, 0) for (lo, hi) in padding]
