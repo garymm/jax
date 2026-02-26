@@ -1761,12 +1761,12 @@ class JaxprStackFrame:
   tracing_eqns: list[Union[ReferenceType[TracingEqn], Callable[[], TracingEqn]]]
   invars: list[Var]
   effects: core.Effects
-  debug_info: core.DebugInfo
+  debug_info: core.DebugInfo | None
   is_high: bool
   mutable_qdds: list[tuple[Var, core.MutableQuasiDynamicData]]
   auto_dce: bool
 
-  def __init__(self, debug_info: core.DebugInfo, auto_dce: bool):
+  def __init__(self, debug_info: core.DebugInfo | None, auto_dce: bool):
     self.gensym = core.gensym()
     self.constid_to_tracer = WeakValueDictionary()
     self.constvar_to_val = {}
@@ -1920,8 +1920,16 @@ class TracingEqn:
 class DynamicJaxprTrace(core.Trace):
   __slots__ = ("frame", "tag", "parent_trace")
 
-  def __init__(self, debug_info: core.DebugInfo, parent_trace=None, lower=False,
-               auto_dce=False):
+  # Note that tag is only used when DynamicJaxprTrace is associated with a LinearizeTrace;
+  # otherwise it will be undefined.
+  tag: core.TraceTag
+  frame: JaxprStackFrame
+  parent_trace: core.Trace | None
+  requires_lower: bool
+
+  def __init__(self, debug_info: core.DebugInfo | None,
+               parent_trace: core.Trace | None = None,
+               lower: bool = False, auto_dce: bool =False):
     super().__init__()
     self.requires_low = lower
     self.frame = JaxprStackFrame(debug_info, auto_dce)
