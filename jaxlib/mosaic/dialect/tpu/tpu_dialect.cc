@@ -242,13 +242,15 @@ void TPUDialect::getCanonicalizationPatterns(RewritePatternSet& results) const
       getContext());
 }
 
-FailureOr<CoreType> GetCoreTypeOfParentFunc(Operation &op) {
-  mlir::Operation *func_op = op.getParentOfType<mlir::func::FuncOp>();
-  if (func_op == nullptr) {
-    return op.emitError() << "Operation " << op.getName()
-                          << " is not inside a func.func";
+FailureOr<CoreType> GetCoreTypeOfParentOp(Operation& op) {
+  Operation* parent = &op;
+  while ((parent = parent->getParentOp())) {
+    if (auto core_type = TPUDialect::GetCoreTypeAttr(parent);
+        core_type.has_value()) {
+      return *core_type;
+    }
   }
-  return TPUDialect::GetCoreTypeAttr(func_op).value_or(CoreType::kTc);
+  return CoreType::kTc;
 }
 
 absl::StatusOr<func::FuncOp> GetFuncWithCoreType(ModuleOp module,

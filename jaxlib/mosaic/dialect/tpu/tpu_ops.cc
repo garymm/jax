@@ -1182,7 +1182,7 @@ LogicalResult MaskCastOp::verify() {
 }
 
 LogicalResult ScanOp::verify() {
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentFunc(**this);
+  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
   if (failed(issuing_core)) {
     return issuing_core;
   }
@@ -1295,7 +1295,7 @@ LogicalResult SemaphoreSignalOp::verify() {
   }
 
   FAILUREOR_ASSIGN_OR_RETURN(CoreType issuing_core_type,
-                             GetCoreTypeOfParentFunc(**this));
+                             GetCoreTypeOfParentOp(**this));
   CoreType target_core_type = getCoreType().value_or(issuing_core_type);
 
   if (getCoreId() == nullptr && getDeviceId() == nullptr) {
@@ -1381,7 +1381,7 @@ LogicalResult EnqueueDMAOp::verify() {
     return emitOpError(
         "Not implemented: non-zero priority is not supported for remote DMA");
   }
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentFunc(**this);
+  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
   if (failed(issuing_core)) {
     return issuing_core;
   }
@@ -1544,7 +1544,7 @@ FailureOr<bool> EnqueueIndirectDMAOp::isGather() {
 }
 
 LogicalResult EnqueueIndirectDMAOp::verify() {
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentFunc(**this);
+  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
   if (failed(issuing_core)) {
     return issuing_core;
   }
@@ -1628,7 +1628,7 @@ FailureOr<bool> WaitIndirectDMAOp::isGather() {
 }
 
 LogicalResult WaitIndirectDMAOp::verify() {
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentFunc(**this);
+  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
   if (failed(issuing_core)) {
     return issuing_core;
   }
@@ -1798,7 +1798,7 @@ LogicalResult ConcatenateOp::verify() {
 }
 
 LogicalResult LogOp::verify() {
-  FailureOr<CoreType> logging_core = GetCoreTypeOfParentFunc(**this);
+  FailureOr<CoreType> logging_core = GetCoreTypeOfParentOp(**this);
   if (failed(logging_core)) {
     return logging_core;
   }
