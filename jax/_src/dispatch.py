@@ -271,6 +271,8 @@ def get_intermediate_shardings(
       out.extend((o, source_info) for o in eqn.params['out_shardings'])
     elif eqn.primitive is shard_map.shard_map_p:
       mesh = eqn.params['mesh']
+      if isinstance(mesh, AbstractMesh):
+        continue
       source_info = SourceInfo(eqn.source_info, eqn.primitive.name)
       out.extend((NamedSharding(mesh, spec), source_info)
                  for spec in [*eqn.params['in_specs'], *eqn.params['out_specs']])
