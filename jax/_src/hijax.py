@@ -113,10 +113,14 @@ class HiType(core.AbstractValue):
   def vspace_add(self, x: HiVal, y: HiVal) -> HiVal:
     assert False, "must override"
 
-  # vmap/scan interface
+  # vmap interface (also needed for scan)
   def dec_rank(self, size: int | None, spec: MappingSpec) -> HiType:
     assert False, "must override"
   def inc_rank(self, size: int | None, spec: MappingSpec) -> HiType:
+    assert False, "must override"
+
+  # scan interface
+  def leading_axis_spec(self) -> MappingSpec:
     assert False, "must override"
 
   # shard_map interface
