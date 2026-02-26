@@ -1540,6 +1540,56 @@ class PallasCallDMATest(ptu.PallasTPUTest):
     )(x)
     np.testing.assert_allclose(y, x)
 
+  def test_dma_with_regular_semaphore(self):
+    if not jtu.is_device_tpu_at_least(6):
+      self.skipTest('Regular semaphores in DMAs require TPU v6+')
+    if not jtu.is_cloud_tpu_at_least(2026, 3, 2):
+      self.skipTest("Test requires a newer libtpu")
+
+    def kernel(x_hbm_ref, y_hbm_ref):
+      def body(x_ref, y_ref, sem):
+        pltpu.async_copy(x_hbm_ref, x_ref, sem)
+        pltpu.semaphore_wait(sem)
+        y_ref[...] = x_ref[...]
+        pltpu.async_copy(y_ref, y_hbm_ref, sem)
+        pltpu.semaphore_wait(sem)
+
+      pl.run_scoped(
+          body,
+          pltpu.VMEM((8, 128), jnp.float32),
+          pltpu.VMEM((8, 128), jnp.float32),
+          pltpu.SemaphoreType.REGULAR,
+      )
+
+    x = jnp.arange(8 * 128.0).reshape((8, 128))
+    y = self.pallas_call(
+        kernel,
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
+        out_specs=pl.BlockSpec(memory_space=pl.ANY),
+        out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+    )(x)
+    np.testing.assert_allclose(y, x)
+
+  def test_dma_wait_with_regular_semaphore_raises(self):
+    def kernel(x_hbm_ref, y_hbm_ref):
+      def body(x_ref, sem):
+        pltpu.async_copy(x_hbm_ref, x_ref, sem).wait()
+
+      pl.run_scoped(
+          body,
+          pltpu.VMEM((8, 128), jnp.float32),
+          pltpu.SemaphoreType.REGULAR,
+      )
+
+    with self.assertRaisesRegex(ValueError, 'semaphore_wait'):
+      x = jnp.arange(8 * 128.0).reshape((8, 128))
+      self.pallas_call(
+          kernel,
+          in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
+          out_specs=pl.BlockSpec(memory_space=pl.ANY),
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+      )(x)
+
   def test_hbm_smem_dma(self):
     def kernel(x_hbm_ref, y_ref):
       def body(x_ref, sem):
