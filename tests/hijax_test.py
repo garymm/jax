@@ -206,18 +206,13 @@ class TupTy(HiType):
     return TupTy(tuple(ty.normalize() for ty in self.tys))
 
   def dec_rank(self, size, spec):
-    if spec == 0:
-      return TupTy(tuple(ty.dec_rank(size, 0) for ty in self.tys))
-    elif isinstance(spec, TupSpec):
-      return TupTy(tuple(ty.dec_rank(size, s) for ty, s in zip(self.tys, spec.val)))
-    else:
-      assert False
+    return TupTy(tuple(ty.dec_rank(size, s) for ty, s in zip(self.tys, spec.val)))
 
   def inc_rank(self, size, spec):
-    if spec == 0:
-      return TupTy(tuple(ty.inc_rank(size, 0) for ty in self.tys))
-    else:
-      assert False
+    return TupTy(tuple(ty.inc_rank(size, 0) for ty in self.tys))
+
+  def leading_axis_spec(self):
+    return TupSpec(tuple(ty.leading_axis_spec() for ty in self.tys))
 
   def shard(self, mesh, manual_axes, check_vma, spec):
     return TupTy(tuple(ty.shard(mesh, manual_axes, check_vma, s)

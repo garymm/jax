@@ -239,7 +239,7 @@ def scan(f: Callable[[Carry, X], tuple[Carry, Y]],
   if config.mutable_array_checks.value:
     check_no_aliased_ref_args(lambda: dbg_body, list(args_avals), list(args))
 
-  x_avals = xs_avals.map(lambda aval: core.mapped_aval(length, 0, aval))
+  x_avals = xs_avals.map(lambda aval: core.mapped_leading_aval(length, aval))
   def _create_jaxpr(carry_avals):
     new_arg_avals = FlatTree.pack(((carry_avals, x_avals), {}))
     jaxpr, out_avals = pe.trace_to_jaxpr(f, new_arg_avals, dbg_body)
@@ -592,9 +592,6 @@ pe.custom_staging_rules[eval_jaxpr_p] = _stage_jaxpr
 def _stage_jaxpr_abstract_eval(*_, jaxpr):
   return jaxpr.out_avals, jaxpr.effects
 
-def _prepend_dim_to_aval(sz, aval):
-  return core.unmapped_aval(sz, 0, aval)
-
 def _scan_abstract_eval(*args, reverse, length, num_consts, num_carry, jaxpr,
                         linear, unroll, _split_transpose):
   if len(args) != len(jaxpr.in_avals):
@@ -609,7 +606,7 @@ def _scan_abstract_eval(*args, reverse, length, num_consts, num_carry, jaxpr,
         'issue at https://github.com/jax-ml/jax/issues, and as a '
         'temporary workaround pass the check_vma=False argument to '
         '`jax.shard_map`')
-  ys_avals = _map(partial(_prepend_dim_to_aval, length), y_avals)
+  ys_avals = _map(partial(core.unmapped_leading_aval, length), y_avals)
   return out_carry_avals + ys_avals, core.eqn_effects(jaxpr)
 
 def _scan_jvp(primals, tangents, reverse, length, jaxpr, num_consts, num_carry,
@@ -872,7 +869,7 @@ def _scan_partial_eval(trace, *tracers, reverse: bool,
   ext_res = _map(trace.new_instantiated_const, ext_res)
   # Create output tracers for jaxpr_unknown bind, adapting extensive shapes.
   carry_avals, y_avals = split_list(jaxpr_unknown.out_avals, [sum(carry_uk)])
-  ys_avals = [core.unmapped_aval(length, 0, y_aval) for y_aval in y_avals]
+  ys_avals = [core.unmapped_leading_aval(length, y_aval) for y_aval in y_avals]
   out_tracers = [pe.JaxprTracer(trace, pe.PartialVal.unknown(a), None)
                  for a in it.chain(carry_avals, ys_avals)]
   del carry_avals, y_avals
@@ -981,8 +978,8 @@ def _scan_transpose_fancy(cts, *args, reverse, length, num_consts,
 
   # prepare transposed jaxpr
   trans_avals, ext_avals = split_list(_map(ad.accum_typeof, trans_in), [num_consts+num_carry])
-  trans_avals = trans_avals + [core.mapped_aval(length, 0, a) for a in ext_avals]
-  xs_avals = tuple(core.mapped_aval(length, 0, ad.accum_typeof(x)) for x in immut_xs_dot)
+  trans_avals = trans_avals + [core.mapped_leading_aval(length, a) for a in ext_avals]
+  xs_avals = tuple(core.mapped_leading_aval(length, ad.accum_typeof(x)) for x in immut_xs_dot)
   jaxpr_trans = _transpose_scan_jaxpr_fancy(
       jaxpr, trans_tree, tuple(trans_avals), lin_refs, xs_avals)
 
@@ -1177,7 +1174,7 @@ def _scan_partial_eval_custom(saveable, unks_in, inst_in, eqn: core.JaxprEqn):
 
   # Create residual variables.
   intensive_avals, ext_avals_mapped = partition_list(loop_dep_res, res_avals)
-  ext_avals = [core.unmapped_aval(eqn.params['length'], 0, a)
+  ext_avals = [core.unmapped_leading_aval(eqn.params['length'], a)
                for a in ext_avals_mapped]
   newvar = core.gensym()
   intensive_res = _map(newvar, intensive_avals)
@@ -1262,9 +1259,8 @@ def _scan_typecheck(bind_time, *in_atoms, reverse, length, num_consts,
   const_avals_jaxpr, init_avals_jaxpr, x_avals_jaxpr = split_list(
       jaxpr.in_avals, [num_consts, num_carry])
   carry_avals_jaxpr, y_avals_mapped = split_list(jaxpr.out_avals, [num_carry])
-  x_avals_mapped = _map(partial(core.mapped_aval, length, 0), x_avals)
-  y_avals = [core.unmapped_aval(length, 0, a)
-             for a in y_avals_mapped]
+  x_avals_mapped = _map(partial(core.mapped_leading_aval, length), x_avals)
+  y_avals = [core.unmapped_leading_aval(length, a) for a in y_avals_mapped]
 
   if not all(_map(core.typematch, init_avals_jaxpr, carry_avals_jaxpr)):
     raise core.JaxprTypeError(
@@ -1324,7 +1320,7 @@ def _scan_state_partial_discharge_rule(
   in_avals = rearrange([core.typeof(a) for a in args])
   pure_const_avals, carry_avals, pure_xs_avals = split_list(
       in_avals, [num_pure_consts, num_const_refs + num_carry + num_xs_refs])
-  pure_x_avals = [core.mapped_aval(length, 0, a) for a in pure_xs_avals]
+  pure_x_avals = [core.mapped_leading_aval(length, a) for a in pure_xs_avals]
   in_avals = [*pure_const_avals, core.typeof(0), *carry_avals, *pure_x_avals]
 
   if jaxpr.jaxpr.debug_info.arg_names is None:

@@ -1724,6 +1724,9 @@ class AbstractValue:
   def inc_rank(self, size, spec):
     return unmapped_aval(size, spec, self)
 
+  def leading_axis_spec(self):
+    return 0
+
   def shard(self, mesh, manual_axes, check_vma, spec):
     return shard_aval(mesh, manual_axes, check_vma, spec, self)
 
@@ -3065,6 +3068,9 @@ def mapped_aval(size: AxisSize, axis, aval: AbstractValue) -> AbstractValue:
   else:
     raise TypeError(f"no mapping handler for {aval} of type {type(aval)}")
 
+def mapped_leading_aval(size, aval) -> AbstractValue:
+  return mapped_aval(size, aval.leading_axis_spec(), aval)
+
 # TODO(yashkatariya): take axis data
 def unmapped_aval(size: AxisSize, axis: int | None,
                   aval: AbstractValue, explicit_mesh_axis=None) -> AbstractValue:
@@ -3077,6 +3083,8 @@ def unmapped_aval(size: AxisSize, axis: int | None,
   else:
     raise TypeError(f"no unmapping handler for {aval} of type {type(aval)}")
 
+def unmapped_leading_aval(size, aval) -> AbstractValue:
+  return unmapped_aval(size, aval.leading_axis_spec(), aval)
 
 def _map_shaped_array(
     size: int, axis: int | None, aval: ShapedArray) -> ShapedArray:
