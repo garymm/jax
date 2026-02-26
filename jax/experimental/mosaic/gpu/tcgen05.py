@@ -185,6 +185,7 @@ def mma(
 ) -> None:
   if a_swizzle == 16 or b_swizzle == 16:
     raise NotImplementedError("No swizzle is not supported")
+  i8 = ir.IntegerType.get_signless(8)
   i32 = ir.IntegerType.get_signless(32)
   if isinstance(accumulate, bool):
     accumulate = arith.constant(ir.IntegerType.get_signless(1), accumulate)
@@ -320,7 +321,7 @@ def mma(
           f"Block-scaled MMA with element type {element_type} only supports f32"
           f" accumulators, but got: {d.dtype}"
       )
-  elif element_type == ir.IntegerType.get_signless(8):
+  elif element_type == i8:
     if is_scaled:
       raise ValueError(
           f"MMA with element type {element_type} does not support block scaling"
@@ -359,11 +360,12 @@ def mma(
         f"In {mode_name} MMA, N must be a multiple of {required_multiple},"
         f" got N={n}"
     )
-  if is_sparse and n.bit_count() != 1:
-    raise NotImplementedError(
-        "Only N that is power of 2 supported for sparse MMA,"
-        f" but got N={n}"
-    )
+  if is_sparse:
+    n_div = 32 if collective and element_type == i8 else 16
+    if n % n_div != 0:
+      raise NotImplementedError(
+          f"N must be a multiple of {n_div} for sparse MMA, but got N={n}"
+      )
   if is_scaled and n % 32 != 0:
     raise NotImplementedError(
         "N must be a multiple of 32 for block-scaled MMA, but got N={n}"
@@ -431,8 +433,6 @@ def mma(
       )
   if is_sparse:
     a_sparse_metadata = cast(TMEMRef, a_sparse_metadata)
-    if n % 32:
-      raise ValueError(f"Sparse MMA requires N to be divisible by 32, got: {n}")
     sparse_group_elems = 8 if utils.bitwidth(element_type) == 4 else 4
     # Each sparse group has 2 entries.
     expected_meta_k = k // sparse_group_elems * 2

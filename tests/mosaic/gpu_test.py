@@ -2070,9 +2070,9 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
       rhs_transpose=(False, True),
       in_jax_dtype=(jnp.float16, jnp.bfloat16, jnp.int8, jnp.float8_e4m3fn),
       m=(128,),  # TODO(apaszke): 256
-      n=(128, 256),  # TODO(apaszke): other non-power-of-2
+      n=(16, 32, 128, 192, 256),
       lhs_swizzle=(32, 64, 128),
-      rhs_swizzle=(64, 128),  # 32 is too small and unsuported.
+      rhs_swizzle=(64, 128),  # 32 is too small and unsupported.
   )
   def test_mma_sparse(self, m, n, in_jax_dtype, lhs_swizzle, rhs_swizzle, lhs_transpose, rhs_transpose):
     if in_jax_dtype == jnp.int8:
@@ -2087,6 +2087,8 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
     k = 256
     lhs_tiling = (8, 8 * lhs_swizzle // bitwidth(in_mlir_dtype))
     rhs_tiling = (8, 8 * rhs_swizzle // bitwidth(in_mlir_dtype))
+    if not rhs_transpose and n % rhs_tiling[1]:
+      self.skipTest(f"{n=} not divisible by {rhs_swizzle=} (for {in_jax_dtype=})")
 
     def kernel(ctx, lhs, rhs, lhs_sparse_gmem, out, scratch):
       lhs_smem, rhs_smem, lhs_sparse_smem, barriers, mma_barrier, acc, lhs_sparse = scratch
@@ -2176,7 +2178,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
   @parameterized.product(
       in_jax_dtype=(jnp.float16, jnp.bfloat16),
       m=(128,),  # TODO(apaszke): 256
-      n=(128, 256),  # TODO(apaszke): other non-power-of-2
+      n=(128, 192, 256),
       lhs_swizzle=(32, 64, 128),
       rhs_swizzle=(64, 128),  # 32 is too small and unsuported.
   )
@@ -2189,6 +2191,8 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
     in_mlir_dtype = utils.dtype_to_ir_type(in_jax_dtype)
     k = 256
     rhs_tiling = (8, 8 * rhs_swizzle // bitwidth(in_mlir_dtype))
+    if n < rhs_tiling[1] or n % rhs_tiling[1]:
+      self.skipTest(f"{n=} not divisible by {rhs_swizzle=} (for {in_jax_dtype=})")
 
     def kernel(ctx, lhs, rhs, lhs_sparse_gmem, out, scratch):
       (
@@ -2287,7 +2291,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
   @parameterized.product(
       in_jax_dtype=(jnp.float16, jnp.float8_e4m3fn),
       m=(256,),  # TODO(apaszke): 256
-      n=(128, 256),  # TODO(apaszke): other non-power-of-2
+      n=(128, 192, 256),
       lhs_swizzle=(32, 64, 128),
       rhs_swizzle=(64, 128),  # 32 is too small and unsupported.
   )
@@ -2299,10 +2303,10 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
     k = 256
     lhs_tiling = (8, 8 * lhs_swizzle // bitwidth(in_mlir_dtype))
     rhs_tiling = (8, 8 * rhs_swizzle // bitwidth(in_mlir_dtype))
-    if m // 2 < lhs_tiling[1]:
-      self.skipTest("LHS too small for this swizzle")
-    if n // 2 < rhs_tiling[1]:
-      self.skipTest("RHS too small for this swizzle")
+    if (m // 2) % lhs_tiling[1]:
+      self.skipTest("LHS not divisible by swizzle")
+    if (n // 2) % rhs_tiling[1]:
+      self.skipTest("RHS not divisible by swizzle")
 
     def kernel(ctx, lhs, rhs, lhs_sparse_gmem, out, scratch):
       lhs_smem, rhs_smem, lhs_sparse_smem, barriers, mma_barrier, acc, lhs_sparse = scratch
@@ -2411,7 +2415,7 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
       in_jax_dtype=(jnp.float8_e5m2, jnp.float8_e4m3fn),
       scale_jax_dtype=(jnp.float8_e8m0fnu,),
       m=(128,),
-      n=(128, 256),
+      n=(128, 192, 256),
       swizzle=(128,),
   )
   def test_mma_block_scaled_sparse(self, m, n, in_jax_dtype, scale_jax_dtype, swizzle):
@@ -2424,6 +2428,8 @@ class TCGen05Test(TestCase, jtu.CudaArchSpecificTest):
     swizzle_elems = 8 * swizzle // bitwidth(in_mlir_dtype)
     k = swizzle_elems * k_steps
     lhs_tiling = rhs_tiling = (8, swizzle_elems)
+    if n % rhs_tiling[1]:
+      self.skipTest(f"{n=} too short for {swizzle=} and {in_jax_dtype=}")
 
     def kernel(ctx, lhs, rhs, lhs_sparse_gmem, lhs_scales_gmem, rhs_scales_gmem, out, scratch):
       (
