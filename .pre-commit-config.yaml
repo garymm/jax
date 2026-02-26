@@ -61,3 +61,13 @@ repos:
       pass_filenames: false
       additional_dependencies: [absl-py==2.4.0, types-requests~=2.32.0, numpy~=2.4.0, ml_dtypes~=0.5.0, scipy-stubs]
       stages: [manual]
+
+- repo: local
+  hooks:
+  - id: check-copyright
+    name: check copyright notice
+    entry: python3 build/check_copyright.py
+    language: python
+    additional_dependencies: [google-re2]
+    files: \.(py|cc|h|c|cu|bzl)$|BUILD
+    exclude: ^(jax/_src/third_party/|tests/third_party/)
