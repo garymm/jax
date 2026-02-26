@@ -417,6 +417,33 @@ class ShapePolyTest(jtu.JaxTestCase, parameterized.TestCase):
         r" @tpu_custom_call.+kernel_name\s*=\s*\"my_custom_kernel_name\"",
     )
 
+  def test_dynamic_shapes_export_requires_flag(self):
+    def add_vectors_kernel(x_ref, y_ref, o_ref):
+      o_ref[...] = x_ref[...] + y_ref[...]
+
+    def add_vectors(x: jax.Array, y: jax.Array) -> jax.Array:
+      return pl.pallas_call(
+          add_vectors_kernel,
+          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          grid_spec=pltpu.PrefetchScalarGridSpec(
+              grid=(1,),
+              in_specs=[
+                  pl.BlockSpec(x.shape, lambda i: (0, 0)),
+                  pl.BlockSpec(y.shape, lambda i: (0, 0)),
+              ],
+              out_specs=pl.BlockSpec(x.shape, lambda i: (0, 0)),
+              num_scalar_prefetch=0,
+          ),
+      )(x, y)
+
+    m, n = jax.export.symbolic_shape("m,n")
+    x_shape = jax.ShapeDtypeStruct((m, n), jnp.float32)
+
+    f_e = jax.export.export(jax.jit(add_vectors), platforms=["tpu"])
+
+    with self.assertRaisesRegex(ValueError, "pallas_export_experimental"):
+      f_e(x_shape, x_shape)
+
   def test_export_vmap(self):
     def add_vectors_kernel(x_ref, y_ref, o_ref):
       o_ref[...] = x_ref[...] + y_ref[...]

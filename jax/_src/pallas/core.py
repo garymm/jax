@@ -551,7 +551,10 @@ class BlockSpec:
       raise ValueError(
           "shape polymorphism for Pallas does not support "
           "dynamically-shaped blocks. "
-          f"Block spec for {origin} has block_shape: {block_aval.shape}"
+          f"Block spec for {origin} has block_shape: {block_aval.shape}. "
+          "If this is intentional, use the "
+          "core.pallas_export_experimental(dynamic_shapes=True) "
+          "context manager to enable dynamic shapes."
       )
 
     fake_index_map_args, fake_index_map_kwargs = \
@@ -1709,6 +1712,10 @@ def lower_as_mlir(
     platforms=None,
     **kwargs,
 ) -> mlir.ir.Module:
+  """Lower the function to MLIR.
+
+  Unlike jax.export, the exported artifact provides no stability guarantees.
+  """
   with pallas_export_experimental(dynamic_shapes):
     f = jit(f, device=device, static_argnames=static_argnames)
     if platforms is None:
