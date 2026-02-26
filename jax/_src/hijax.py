@@ -506,7 +506,13 @@ class VmapOf(VJPHiPrimitive):
     return tree_map(partial(unmap_zero, self.axis_data), self.in_dims, out, is_leaf=lambda x: x is None)  # type: ignore
 
   def batch_dim_rule(self, axis_data, in_dims):
-    in_dims_ = tree_map(lambda d, d_: d - (d_ < d), in_dims, self.in_dims)  # type: ignore
+
+    def fix_dim(dim, prev_dim):
+      if dim is None:
+        return None
+      return dim if prev_dim is None else (dim - (prev_dim < dim))
+
+    in_dims_ = tree_map(fix_dim, in_dims, self.in_dims, is_leaf=lambda x: x is None)
     out_dim = self.prim.batch_dim_rule(axis_data, in_dims_)  # type: ignore
     return tree_map(lambda d, d_: d + (d_ < d), out_dim, self.out_dim)  # type: ignore
 

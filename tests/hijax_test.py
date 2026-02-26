@@ -615,7 +615,6 @@ class HijaxTest(jtu.JaxTestCase):
     mul_p = MyMul('my_mul')
     add_p = MyAdd('my_add')
 
-
     @jax.jit
     def f(x):
       return to(from_(x))
@@ -954,6 +953,42 @@ class HijaxTest(jtu.JaxTestCase):
 
     with self.assertRaises(AttributeError):
       f(2.0)
+
+  def test_newstyle_hiprimitive_vmap(self):
+
+    class Mul(VJPHiPrimitive):
+
+      def __init__(self, aval):
+        self.in_avals = (aval, aval)
+        self.out_aval = aval
+        self.params = {}
+        super().__init__()
+
+      def expand(self, x, y):
+        return x * y
+
+      def batch_dim_rule(self, axis_data, in_dims):
+        return in_dims[1] if in_dims[0] is None else in_dims[0]
+
+    def mul(x, y):
+      return Mul(typeof(x))(x, y)
+
+    self.assertAllClose(mul(2.0, 3.0), 6.0)
+    x = jnp.arange(3.0)
+    y = jnp.arange(3.0) + 1.0
+    self.assertAllClose(jax.vmap(mul)(x, y), x * y)
+    x = jnp.arange(6.0).reshape(2, 3)
+    self.assertAllClose(jax.vmap(mul, in_axes=(0, None))(x, y), x * y[None, :])
+    self.assertAllClose(jax.vmap(mul, in_axes=(None, 0))(y, x), x * y[None, :])
+    x = jnp.arange(24.0).reshape(2, 3, 4)
+    f = jax.vmap(mul, in_axes=(0, None))
+    f = jax.vmap(f, in_axes=(2, None), out_axes=2)
+    self.assertAllClose(f(x, y), x * y[None, :, None])
+    x = jnp.arange(12.0).reshape(3, 4)
+    y = jnp.arange(6.0).reshape(2, 3)
+    f = jax.vmap(mul, in_axes=(None, 0))
+    f = jax.vmap(f, in_axes=(1, None), out_axes=2)
+    self.assertAllClose(f(x, y), x[None, :, :] * y[:, :, None])
 
   @config.numpy_dtype_promotion('standard')
   def test_newstyle_hiprimitive_qarray(self):
