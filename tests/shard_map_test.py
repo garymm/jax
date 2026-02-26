@@ -5069,6 +5069,18 @@ class ShardMapTest(jtu.JaxTestCase):
       if axis_type == (AxisType.Explicit,):
         self.assertEqual(out.sharding, NamedSharding(mesh, P(None, 'x')))
 
+  def test_shard_map_without_device_put_fails(self):
+    mesh = jtu.create_mesh((2,), ('x',))
+    x = np.zeros((4, 8))
+    f = jax.jit(shard_map(lambda x: x, mesh=mesh.abstract_mesh, in_specs=P('x'),
+                          out_specs=P('x')))
+    with self.assertRaises(ValueError):
+      f(x)
+
+    with self.assertRaisesRegex(
+        RuntimeError, "device_assignment cannot be `None` during compilation"):
+      f.trace(x).lower(lowering_platforms=('cpu',)).compile()
+
 
 class FunSpec(NamedTuple):
   name: str
