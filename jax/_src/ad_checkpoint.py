@@ -1025,7 +1025,7 @@ class RematTraced(VJPHiPrimitive):
 
   def vjp_bwd(self, res, outgrad, *arg_accums):
     primals, fwd2 = res
-    _, bwd = api.vjp(fwd2, *api.lax.optimization_barrier(primals))
+    _, bwd = api.vjp(fwd2, *lax_internal.optimization_barrier(primals))
     arg_grads = bwd(outgrad)
     for x, ct in zip(arg_accums, arg_grads):
       x.accum(ct)
