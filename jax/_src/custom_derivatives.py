@@ -393,7 +393,7 @@ class CustomJVPCallPrimitive(core.Primitive):
     fun, jvp, tracers = args[0], args[1], args[2:]
     return trace.process_custom_jvp_call(self, fun, jvp, tracers, **params)
 
-  def impl(self, fun, _, *args):
+  def impl(self, fun, _, *args):  # type: ignore[bad-override]
     raise NotImplementedError
 
   def get_bind_params(self, params):
@@ -1000,7 +1000,7 @@ class CustomVJPCallPrimitive(core.Primitive):
     fun, fwd, bwd, tracers = args[0], args[1], args[2], args[3:]
     return trace.process_custom_vjp_call(self, fun, fwd, bwd, tracers, **params)
 
-  def impl(self, fun, fwd, bwd, *args):
+  def impl(self, fun, fwd, bwd, *args):  # type: ignore[bad-override]
     raise NotImplementedError
 
   def get_bind_params(self, params):

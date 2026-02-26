@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Sequence
+from typing import Sequence, Literal
 from jax._src.lib import _jax
 
 import numpy as np
@@ -256,12 +256,12 @@ class TypedNdArray:
   def clip(self, *args, **kwargs):
     return self.val.clip(*args, **kwargs)
 
-  def astype(self, dtype, order='K', casting='unsafe', subok=True, copy=True):
-    return self.val.astype(
+  def astype(self, dtype, order: str = 'K', casting: str = 'unsafe', subok: bool = True, copy: bool = True):
+    return self.val.astype(  # type: ignore[no-matching-overload, call-overload]
         dtype, order=order, casting=casting, subok=subok, copy=copy
     )
 
-  def tobytes(self, order='C'):
+  def tobytes(self, order: Literal['A', 'C', 'F', 'K'] | None = 'C'):
     return self.val.tobytes(order=order)
 
 _jax.set_typed_ndarray_type(TypedNdArray)

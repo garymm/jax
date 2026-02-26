@@ -1120,7 +1120,8 @@ def primal_tangent_dtype(primal_dtype, tangent_dtype,
     name = name_
     _rules = rules
     type = primal_tangent_dtype_scalar
-    __repr__ = lambda _: name_
+    def __repr__(self):
+      return name_
 
   return PrimalTangentDType()
 
