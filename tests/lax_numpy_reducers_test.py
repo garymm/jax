@@ -423,8 +423,6 @@ class JaxNumpyReducerTests(jtu.JaxTestCase):
     )
     for rec in JAX_REDUCER_INITIAL_RECORDS
   ))
-  # TODO(dsuo): Revert after cl/874691075 break is resolved.
-  @unittest.skip('Reducer where tests are broken')
   def testReducerWhere(self, name, rng_factory, shape, dtype, axis,
                        keepdims, initial, inexact, whereshape, tol):
     np_op = getattr(np, name)
@@ -488,8 +486,6 @@ class JaxNumpyReducerTests(jtu.JaxTestCase):
       keepdims=[False, True],
     ) for rec in JAX_REDUCER_WHERE_NO_INITIAL_RECORDS
   ))
-  # TODO(dsuo): Revert after cl/874691075 break is resolved.
-  @unittest.skip('Reducer where tests are broken')
   def testReducerWhereNoInitial(self, name, rng_factory, shape, dtype, axis,
                                 keepdims, inexact, whereshape, tol):
     np_op = getattr(np, name)
