@@ -351,6 +351,7 @@ cc_library(
         "@xla//xla/ffi",
         "@xla//xla/service/gpu/llvm_gpu_backend:nvptx_libdevice_path",
         "@xla//xla/service/llvm_ir:llvm_command_line_options",
+        "@xla//xla/stream_executor:device_address_handle",
         "@xla//xla/stream_executor:device_description",
         "@xla//xla/stream_executor/cuda:assemble_compilation_provider",
         "@xla//xla/stream_executor/cuda:compilation_provider",

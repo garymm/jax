@@ -258,37 +258,22 @@ def _mosaic_gpu_lowering_rule(
           launch_context.uses_collective_metadata(module)
       ),
   )
-  custom_call_kwargs = {
-      "call_target_name": "mosaic_gpu_v2",
-      "result_types": [mlir.aval_to_ir_type(aval) for aval in ctx.avals_out],
-      "operands": args,
-      "operand_layouts": [list(reversed(range(a.ndim))) for a in ctx.avals_in],
-      "result_layouts": [list(reversed(range(a.ndim))) for a in ctx.avals_out],
-      "backend_config": backend_config,
-      "operand_output_aliases": dict(input_output_aliases),
-      "api_version": 4
-  }
 
-  if not is_multi_device_module or not is_single_process_multi_device_topology():
-    return mlir.custom_call(**custom_call_kwargs).results  # type: ignore
+  if is_multi_device_module and is_single_process_multi_device_topology():
+    backend_config["xla_replica_ids"] = ir.StringAttr.get(
+        ",".join(map(str, replica_ids))
+    )
 
-  # Add collective metadata as additional output buffer.
-  # Collective metadata stores pointers to both input and output parameters.
-  num_params = len(ctx.avals_out) + len(ctx.avals_in)
-  num_peers = axis_context.mesh.size
-  collective_metadata_size = (
-      launch_context.COLLECTIVE_METADATA_SIZE + num_peers * num_params
-  )
-
-  custom_call_kwargs["result_layouts"] += [[0]]  # type: ignore
-  custom_call_kwargs["result_types"] += [  # type: ignore
-      ir.RankedTensorType.get((collective_metadata_size,),
-                              ir.IntegerType.get_signless(64))]
-  backend_config["xla_replica_ids"] = ir.StringAttr.get(
-      ",".join(map(str, replica_ids))
-  )
-  # Drop the collective metadata buffer from the results.
-  return mlir.custom_call(**custom_call_kwargs).results[:-1]  # type: ignore
+  return mlir.custom_call(
+      call_target_name="mosaic_gpu_v2",
+      result_types=[mlir.aval_to_ir_type(aval) for aval in ctx.avals_out],
+      operands=args,
+      operand_layouts=[list(reversed(range(a.ndim))) for a in ctx.avals_in],
+      result_layouts=[list(reversed(range(a.ndim))) for a in ctx.avals_out],
+      backend_config=backend_config,
+      operand_output_aliases=dict(input_output_aliases),
+      api_version=4,
+  ).results  # type: ignore
 
 mlir.register_lowering(mosaic_gpu_p, _mosaic_gpu_lowering_rule, "cuda")
 
