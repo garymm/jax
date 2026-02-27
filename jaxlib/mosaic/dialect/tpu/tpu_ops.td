@@ -1283,7 +1283,6 @@ def TPU_EnqueueDMAOp : TPU_Op<"enqueue_dma", [AttrSizedOperandSegments]> {
   }];
   let hasVerifier = 1;
   let hasCanonicalizeMethod = 1;
-  let hasFolder = 1;
   let builders = [
     // A backward-compatible builder that sets `core_type` to nullptr.
     OpBuilder<(ins "Value":$source, "Value":$source_semaphore,
@@ -1346,7 +1345,6 @@ def TPU_EnqueueIndirectDMAOp : TPU_Op<"enqueue_indirect_dma">, IndirectDMAOp {
                                 MemRefType operand_ty);
   }];
   let hasCanonicalizeMethod = 1;
-  let hasFolder = 1;
 }
 
 // tpu.wait_dma2 waits for a DMA to complete.
