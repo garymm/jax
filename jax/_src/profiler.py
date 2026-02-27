@@ -86,7 +86,7 @@ def stop_server():
 class _ProfileState:
   def __init__(self):
     self.profile_session = None
-    self.log_dir = None
+    self.log_dir: str | None = None
     self.create_perfetto_link = False
     self.create_perfetto_trace = False
     self.lock = threading.Lock()
@@ -207,7 +207,7 @@ class _PerfettoServer(http.server.SimpleHTTPRequestHandler):
     return super().end_headers()
 
   def do_GET(self):
-    self.server.last_request = self.path
+    self.server.last_request = self.path  # type: ignore[missing-attribute]
     return super().do_GET()
 
   def do_POST(self):
@@ -245,7 +245,7 @@ def stop_trace():
     sess = _profile_state.profile_session
     sess.stop_and_export(str(_profile_state.log_dir))  # type: ignore
     if _profile_state.create_perfetto_trace:
-      abs_filename = _write_perfetto_trace_file(_profile_state.log_dir)
+      abs_filename = _write_perfetto_trace_file(_profile_state.log_dir)  # type: ignore[bad-argument-type]
       if _profile_state.create_perfetto_link:
         _host_perfetto_trace_file(abs_filename)
     _profile_state.reset()
