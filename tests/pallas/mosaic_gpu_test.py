@@ -38,6 +38,7 @@ from jax._src import test_util as jtu
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith as arith_dialect
 from jax._src.lib.mlir.dialects import gpu as gpu_dialect
+from jax._src.lib.mlir.dialects import memref as memref_dialect
 from jax._src.pallas import core as pallas_core
 from jax._src.pallas import primitives as pallas_primitives
 from jax._src.pallas.mosaic_gpu import core as gpu_core
@@ -2970,6 +2971,68 @@ class PallasCallWarpPrimitiveSemanticsTest(PallasTest):
     with self.assertRaisesRegex(
         mgpu_lowering.LoweringError,
         "Can only close over scalars and Refs .* with WarpMesh",
+    ):
+      kernel()
+
+  def test_inline_mgpu_in_warp(self):
+    warp_mesh = plgpu.WarpMesh(axis_name="warp")
+    @functools.partial(
+        self.kernel,
+        out_shape=(
+            jax.ShapeDtypeStruct((), jnp.int32),
+            jax.ShapeDtypeStruct((), jnp.int32),
+        ),
+    )
+    def kernel(y_ref, z_ref):
+      @pl.core_map(warp_mesh)
+      def _():
+        warp_id = lax.axis_index("warp")
+        @plgpu.inline_mgpu(
+            arg_types=(plgpu.RefType(), plgpu.Layout.WG_SPLAT),
+            return_type=plgpu.ShapeDtypeStruct(
+                (), jnp.int32, layout=plgpu.Layout.WG_SPLAT
+            ),
+        )
+        def write(ctx, ref, wid):
+          del ctx
+          memref_dialect.store(wid.registers.item(), ref, [])
+          i32 = ir.IntegerType.get_signless(32)
+          ten = mgpu.FragmentedArray.splat(
+              mgpu.c(10, i32), (), is_signed=True
+          )
+          return wid + ten
+        @pl.when(warp_id == 1)
+        def _():
+          result = write(y_ref, warp_id)
+          z_ref[...] = result
+    y, z = kernel()
+    np.testing.assert_array_equal(y, 1)
+    np.testing.assert_array_equal(z, 11)
+
+  def test_inline_mgpu_in_warp_rejects_non_scalar(self):
+    warp_mesh = plgpu.WarpMesh(axis_name="warp")
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((128,), jnp.float32),
+        out_specs=pl.BlockSpec(memory_space=plgpu.SMEM),
+    )
+    def kernel(y_ref):
+      @pl.core_map(warp_mesh)
+      def _():
+        @plgpu.inline_mgpu(
+            arg_types=(),
+            return_type=plgpu.ShapeDtypeStruct(
+                (128,), jnp.float32, layout=plgpu.Layout.WGMMA
+            ),
+        )
+        def bad(ctx):
+          del ctx
+          return mgpu.FragmentedArray.splat(mgpu.c(0.0), (128,))
+        y_ref[...] = bad()
+    with self.assertRaisesRegex(
+        Exception,
+        r"inline_mgpu in a single-warp context only supports scalar return"
+        r" types\. Got shape=\(128,\)\.",
     ):
       kernel()
 

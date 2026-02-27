@@ -2786,9 +2786,22 @@ def _inline_mgpu_flat_transformed_args(
   is_wg_semantics = (
       ctx.module_ctx.lowering_semantics == mgpu.LoweringSemantics.Warpgroup
   )
+  is_warp_semantics = (
+      ctx.module_ctx.primitive_semantics == gpu_core.PrimitiveSemantics.Warp
+  )
 
   if not is_wg_semantics:
-    for a, t in zip(flat_args, flat_arg_types):
+    flat_args = [
+        lowering._ensure_fa(a, aval.dtype) if not isinstance(t, RefType) else a
+        for a, aval, t in zip(flat_args, flat_arg_avals, flat_arg_types)
+    ]
+    for a, aval, t in zip(flat_args, flat_arg_avals, flat_arg_types):
+      if is_warp_semantics and not isinstance(t, RefType):
+        if not isinstance(aval, jax_core.ShapedArray) or aval.shape:
+          raise ValueError(
+              "inline_mgpu in a single-warp context only supports scalar"
+              f" arrays (and Refs). Got {aval}."
+          )
       _type_check_mgpu_lane_semantics(a, t)
 
   flat_transformed : list[ir.Value] = []
@@ -2837,6 +2850,7 @@ def _inline_mgpu_flat_transformed_args(
 
 
 @lowering.register_lowering_rule(inline_mgpu_p, mgpu.LoweringSemantics.Lane)
+@lowering.register_lowering_rule(inline_mgpu_p, *gpu_core.LANExWARP_SEMANTICS)
 def _inline_mgpu_lowering_rule(
     ctx: lowering.LoweringRuleContext,
     *flat_args_and_transforms,
@@ -2847,6 +2861,17 @@ def _inline_mgpu_lowering_rule(
     pytree_ref_transforms,
     pytree_ret_ty,
 ):
+  is_warp_semantics = (
+      ctx.module_ctx.primitive_semantics == gpu_core.PrimitiveSemantics.Warp
+  )
+  if is_warp_semantics:
+    for r in flat_ret_ty:
+      if isinstance(r, ShapeDtypeStruct) and r.shape:
+        raise ValueError(
+            "inline_mgpu in a single-warp context only supports scalar return"
+            f" types. Got shape={r.shape}."
+        )
+
   flat_transformed = _inline_mgpu_flat_transformed_args(
       ctx,
       flat_args_and_transforms,
