@@ -1206,7 +1206,7 @@ def _log_ndtr_asymptotic_series(x, series_order):
   return dtype(1.) + even_sum - odd_sum
 
 
-def _double_factorial(n: int) -> np.ndarray:
+def _double_factorial(n: int) -> np.integer:
   """The double factorial function for small Python integer `n`."""
   return np.prod(np.arange(n, 1, -2))
 
