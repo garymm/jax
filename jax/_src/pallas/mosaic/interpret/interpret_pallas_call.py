@@ -1061,16 +1061,23 @@ def semaphore_wait(device_id, local_core_id, sem_id, value):
   sem.wait(value, global_core_id)
 
 
-def _is_any(memory_space):
-  return memory_space is pallas_core.MemorySpace.ANY
+_SEMAPHORE = mosaic_core.MemorySpace.SEMAPHORE
+_HBM = mosaic_core.MemorySpace.HBM
+_ANY = pallas_core.MemorySpace.ANY
+
+
+def _forward_any_to_hbm(memory_space):
+  if memory_space is _ANY:
+    return _HBM
+  return memory_space
 
 
 _SENTINEL = jnp.inf
 
 
 def _get_memory_space_and_raise_if_hbm(aval, primitive_name, message=None):
-  memory_space = aval.memory_space
-  if memory_space in [mosaic_core.MemorySpace.HBM, pallas_core.MemorySpace.ANY]:
+  memory_space = _forward_any_to_hbm(aval.memory_space)
+  if memory_space is _HBM:
     if message is None:
       message = (
           f'{primitive_name}: Buffers with a memory space of HBM or ANY cannot'
@@ -1244,7 +1251,7 @@ def _interpret_jaxpr(
         # runs the same sequence of `run_scoped`s.
         allocs = []
         for v in eqn.params['jaxpr'].invars:
-          if v.aval.memory_space == mosaic_core.MemorySpace.SEMAPHORE:
+          if v.aval.memory_space is _SEMAPHORE:
             allocs.append(
                 callback.io_callback(
                     _allocate_semaphores,
@@ -1261,7 +1268,7 @@ def _interpret_jaxpr(
                 v.aval, 'run_scoped_p', "Cannot allocate HBM in `run_scoped`."
               )
             else:
-              memory_space = v.aval.memory_space
+              memory_space = _forward_any_to_hbm(v.aval.memory_space)
             allocs.append(
                 callback.io_callback(
                     _allocate_buffer,
@@ -1279,7 +1286,7 @@ def _interpret_jaxpr(
         out = _interpret(eqn.params['jaxpr'], *deferred_invals(), *allocs)
 
         for a, v in zip(allocs, eqn.params['jaxpr'].invars):
-          if v.aval.memory_space == mosaic_core.MemorySpace.SEMAPHORE:
+          if v.aval.memory_space is _SEMAPHORE:
             # TODO(jburnim): De-allocate semaphores.
             # callback.io_callback(
             #     _deallocate_semaphores,
@@ -1294,7 +1301,10 @@ def _interpret_jaxpr(
                 None,
                 device_id,
                 local_core_id,
-                TPU_MEMORY_SPACE_IDXS[v.aval.memory_space],
+                # An exception would have been raised before `_allocate_buffer`
+                # above if `memory_space` were HBM (i.e. either `pltpu.HBM` or
+                # `pl.ANY`) and if this was disallowed by `interpret_params`.
+                TPU_MEMORY_SPACE_IDXS[_forward_any_to_hbm(v.aval.memory_space)],
                 a,
                 ordered=True,
             )
@@ -1350,12 +1360,34 @@ def _interpret_jaxpr(
             axis_indices)
         (orig_src_ref, _, orig_dst_ref, *_
         ) = jax.tree.unflatten(eqn.params['tree'], eqn.invars)
-        src_memory_space = getattr(orig_src_ref.aval, 'memory_space', None)
+        src_memory_space = _forward_any_to_hbm(
+            getattr(orig_src_ref.aval, 'memory_space', None)
+        )
         if src_memory_space is None:
-          src_memory_space = pallas_core.MemorySpace.ANY
-        dst_memory_space = getattr(orig_dst_ref.aval, 'memory_space', None)
+          # This is brittle. There are examples where a ref with memory_space
+          # set to `None` appears as one of the `constvars` of a `run_scoped`,
+          # and the corresponding input to the `run_scoped` is a buffer in VMEM
+          # (and not in HBM).
+          #
+          # Note that pairing the buffer id, i.e. `src`, here with an incorrect
+          # memory space will result in a (very visible) `KeyError` for now.
+          # (This is because the buffer id alone suffices to uniquely identify
+          # the buffer held by the `SharedMemory` object. The memory space can
+          # be considered merely additional information (useful for debugging)
+          # that is added to the key that the `SharedMemory` object uses
+          # internally to look up a buffer.)
+          #
+          # TODO(nrink): It would be more robust if the buffer id, i.e. `src`,
+          # did already encode enough information to identify the correct
+          # buffer, without the need to explicitly pass the memory space to the
+          # `dma_start` callback below.
+          src_memory_space = mosaic_core.MemorySpace.HBM
+        dst_memory_space = _forward_any_to_hbm(
+            getattr(orig_dst_ref.aval, 'memory_space', None)
+        )
         if dst_memory_space is None:
-          dst_memory_space = pallas_core.MemorySpace.ANY
+          # TODO(nrink): See comment for `src_memory_space` above.
+          dst_memory_space = mosaic_core.MemorySpace.HBM
         callback.io_callback(
             functools.partial(dma_start, source_info=eqn.source_info),
             (),
@@ -1746,7 +1778,7 @@ def interpret_pallas_call(
             jax.ShapeDtypeStruct((), jnp.int16),
             device_id,
             None,  # local_core_id
-            TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY],
+            TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.HBM],
             input_args[i],
             ordered=True,
         )
@@ -1781,7 +1813,7 @@ def interpret_pallas_call(
               jax.ShapeDtypeStruct((), jnp.int16),
               device_id,
               None,  # local_core_id
-              TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY],
+              TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.HBM],
               padded_val,
               ordered=True,
           )
@@ -1813,8 +1845,8 @@ def interpret_pallas_call(
     is_input = i < grid_mapping.num_inputs
     is_output = (output_idx >= 0) and (output_idx < grid_mapping.num_outputs)
     aval = var.aval
-    assert isinstance(aval, state.AbstractRef)
-    if aval.memory_space == mosaic_core.MemorySpace.SEMAPHORE:
+    memory_space = _forward_any_to_hbm(aval.memory_space)
+    if memory_space is _SEMAPHORE:
       kernel_buffer_ids.append(
           callback.io_callback(
               _allocate_semaphores,
@@ -1825,7 +1857,7 @@ def interpret_pallas_call(
               ordered=True,
           )
       )
-    elif _is_any(aval.memory_space):
+    elif memory_space is _HBM:
       # Use the already-allocated HBM input or output buffer.
       #
       # TODO(jburnim): For kernel args in HBM, check that block shape equals the
@@ -1843,8 +1875,10 @@ def interpret_pallas_call(
               jax.ShapeDtypeStruct((), jnp.int16),
               device_id,
               None,  # local_core_id,
-              TPU_MEMORY_SPACE_IDXS[aval.memory_space],
-              interpret_params.get_uninitialized_array(aval.shape, aval.dtype),
+              TPU_MEMORY_SPACE_IDXS[memory_space],
+              interpret_params.get_uninitialized_array(
+                  var.aval.shape, var.aval.dtype
+              ),
               ordered=True,
           )
       )
@@ -2021,7 +2055,7 @@ def interpret_pallas_call(
               jax.ShapeDtypeStruct(input_var.aval.shape, input_var.aval.dtype),
               device_id,
               core_index,
-              TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY],
+              TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.HBM],
               input_buffer_ids[index],
               (transform,),
               cur_block_indices[index],
@@ -2035,7 +2069,9 @@ def interpret_pallas_call(
               (),
               device_id,
               core_index,
-              TPU_MEMORY_SPACE_IDXS[input_var.aval.memory_space],
+              TPU_MEMORY_SPACE_IDXS[
+                  _forward_any_to_hbm(input_var.aval.memory_space)
+              ],
               input_ids[index],
               (),
               sliced_val,
@@ -2043,7 +2079,12 @@ def interpret_pallas_call(
           )
 
         for j, var in enumerate(input_vars):
-          if _is_any(var.aval.memory_space):
+          if _forward_any_to_hbm(var.aval.memory_space) is _HBM:
+            if var.aval.shape != block_shapes[j]:
+              raise ValueError(
+                  f'Kernel input {j} in HBM but does not have trivial'
+                  ' BlockSpec.'
+              )
             continue
           assert len(cur_start_indices[j].shape) == 1
           assert len(prev_start_indices[j].shape) == 1
@@ -2078,7 +2119,9 @@ def interpret_pallas_call(
               output_var.aval,
               device_id,
               core_index,
-              TPU_MEMORY_SPACE_IDXS[output_var.aval.memory_space],
+              TPU_MEMORY_SPACE_IDXS[
+                  _forward_any_to_hbm(output_var.aval.memory_space)
+              ],
               kernel_output_ids[index],
               (),
               ordered=True,
@@ -2090,7 +2133,7 @@ def interpret_pallas_call(
               (),
               device_id,
               core_index,
-              TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY],
+              TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.HBM],
               output_buffer_ids[index],
               (transform,),
               kernel_output_val,
@@ -2101,7 +2144,12 @@ def interpret_pallas_call(
 
         output_slices : list[Any] = []
         for j, var in enumerate(output_vars):
-          if _is_any(var.aval.memory_space):
+          if _forward_any_to_hbm(var.aval.memory_space) is _HBM:
+            if var.aval.shape != block_shapes[num_inputs + j]:
+              raise ValueError(
+                  f'Kernel output {j} in HBM but does not have trivial'
+                  ' BlockSpec.'
+              )
             output_slices.append(None)
             continue
           assert len(cur_start_indices[num_inputs + j].shape) == 1
@@ -2209,7 +2257,7 @@ def interpret_pallas_call(
           val,
           device_id,
           0,  # local_core_id
-          TPU_MEMORY_SPACE_IDXS[pallas_core.MemorySpace.ANY],
+          TPU_MEMORY_SPACE_IDXS[mosaic_core.MemorySpace.HBM],
           output_buffer_id,
           (
               indexing.NDIndexer.from_indices_shape(

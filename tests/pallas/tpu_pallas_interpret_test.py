@@ -110,7 +110,8 @@ class InterpretTest(jtu.JaxTestCase):
       # Workaround for https://github.com/jax-ml/jax/issues/25671
       self.skipTest(f'requires 1 device, found {self.num_devices}')
 
-  def test_revisiting_is_an_error(self):
+  @parameterized.parameters(pltpu.HBM, pl.ANY)
+  def test_revisiting_is_an_error(self, memory_space):
     def kernel(x_ref, o1_ref, o2_ref):
       pass
 
@@ -123,7 +124,7 @@ class InterpretTest(jtu.JaxTestCase):
               jax.ShapeDtypeStruct((16, 256), jnp.float32),
           ],
           grid=(4, 4),
-          in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
+          in_specs=[pl.BlockSpec(memory_space=memory_space)],
           out_specs=[
               pl.BlockSpec((4, 128), lambda i, j: (i, j // 2)),
               pl.BlockSpec((4, 128), lambda i, j: (j // 2, i % 2)),
@@ -238,12 +239,21 @@ class InterpretTest(jtu.JaxTestCase):
                       0)  # sum includes one uninitialized value
     elif out_of_bounds_reads == 'raise':
       with self.assertRaisesRegex(Exception, 'Out-of-bounds read'):
-        run(jnp.array([0, 1], jnp.int32),
-            jnp.array([2, 6, 9, 15, 17], jnp.int32)),
+        _ = (
+            run(
+                jnp.array([0, 1], jnp.int32),
+                jnp.array([2, 6, 9, 15, 17], jnp.int32),
+            ),
+        )
       pltpu.reset_tpu_interpret_mode_state()
 
-  @parameterized.parameters('raise', 'uninitialized')
-  def test_out_of_bounds_read_range(self, out_of_bounds_reads):
+  @parameterized.product(
+      out_of_bounds_reads=['raise', 'uninitialized'],
+      hbm_memory_space=[pltpu.HBM, pl.ANY],
+  )
+  def test_out_of_bounds_read_range(
+      self, out_of_bounds_reads, hbm_memory_space
+  ):
     def kernel(x_ref, o_ref, sem):
       pltpu.async_copy(x_ref.at[pl.ds(jnp.int32(4), 8), 1], o_ref, sem).wait()
 
@@ -253,7 +263,7 @@ class InterpretTest(jtu.JaxTestCase):
           kernel,
           out_shape=jax.ShapeDtypeStruct((8, 128,), jnp.float32),
           out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
-          in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
+          in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
           scratch_shapes=[pltpu.SemaphoreType.DMA],
           interpret=pltpu.InterpretParams(
               out_of_bounds_reads=out_of_bounds_reads),
@@ -378,8 +388,11 @@ class InterpretTest(jtu.JaxTestCase):
     #    [3, 7, 11, 15]]
     np.testing.assert_allclose(y[::8, ::128], expected)
 
-  @parameterized.parameters('eager', 'on_wait')
-  def test_race_detection(self, dma_execution_mode):
+  @parameterized.product(
+      dma_execution_mode=['eager', 'on_wait'],
+      hbm_memory_space=[pltpu.HBM, pl.ANY],
+  )
+  def test_race_detection(self, dma_execution_mode, hbm_memory_space):
     def kernel_without_race(x_ref, o_ref, t_ref, sem):
       copy = pltpu.make_async_copy(x_ref, t_ref, sem)
       copy.start()
@@ -397,7 +410,7 @@ class InterpretTest(jtu.JaxTestCase):
     y = pl.pallas_call(
         kernel_without_race,
         out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
+        in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
         scratch_shapes=[
             pltpu.VMEM(x.shape, x.dtype),
             pltpu.SemaphoreType.DMA,
@@ -412,7 +425,7 @@ class InterpretTest(jtu.JaxTestCase):
     pl.pallas_call(
         kernel_with_race,
         out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
+        in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
         scratch_shapes=[
             pltpu.VMEM(x.shape, x.dtype),
             pltpu.SemaphoreType.DMA,
@@ -611,7 +624,7 @@ class InterpretTest(jtu.JaxTestCase):
 
   @parameterized.product(
       num_cores=[1, 2, 4],
-      use_context_manager=[False, True]
+      use_context_manager=[False, True],
   )
   def test_core_map(self, num_cores, use_context_manager):
     mesh = pltpu.create_tensorcore_mesh('x', num_cores=num_cores)
@@ -665,7 +678,8 @@ class InterpretTest(jtu.JaxTestCase):
       y = f(x)
     np.testing.assert_array_equal(y, expected_out)
 
-  def test_hbm_allocation_in_run_scoped_raises(self):
+  @parameterized.parameters(pltpu.HBM, pl.ANY)
+  def test_hbm_allocation_in_run_scoped_raises(self, hbm_memory_space):
     mesh = pltpu.create_tensorcore_mesh('x', num_cores=1)
 
     @jax.jit
@@ -688,7 +702,7 @@ class InterpretTest(jtu.JaxTestCase):
 
           pl.run_scoped(
               copy,
-              pltpu.HBM(x_ref.shape, x_ref.dtype),
+              hbm_memory_space(x_ref.shape, x_ref.dtype),
           )
 
       _, y =  pl.run_state(inner)((x, y))
@@ -700,10 +714,12 @@ class InterpretTest(jtu.JaxTestCase):
       f(jnp.arange(8))
 
   @parameterized.product(
-      first_core_to_copy=[0, 1], dma_execution_mode=['eager', 'on_wait']
+      first_core_to_copy=[0, 1],
+      dma_execution_mode=['eager', 'on_wait'],
+      hbm_memory_space=[pltpu.HBM, pl.ANY],
   )
   def test_allocate_shared_buffer_in_core_map(
-      self, first_core_to_copy, dma_execution_mode
+      self, first_core_to_copy, dma_execution_mode, hbm_memory_space
   ):
     mesh = pltpu.create_tensorcore_mesh('x', num_cores=2)
     second_core_to_copy = 1 if first_core_to_copy == 0 else 0
@@ -751,7 +767,7 @@ class InterpretTest(jtu.JaxTestCase):
 
             pl.run_scoped(
                 copy,
-                pltpu.HBM(x_ref.shape, x_ref.dtype),
+                hbm_memory_space(x_ref.shape, x_ref.dtype),
             )
 
             @pl.when(jax.lax.axis_index('x') == first_core_to_copy)
@@ -772,10 +788,12 @@ class InterpretTest(jtu.JaxTestCase):
     self.assertFalse(mosaic_interpret.races.races_found)
 
   @parameterized.product(
-      slow_core=[0, 1], dma_execution_mode=['eager', 'on_wait']
+      slow_core=[0, 1],
+      dma_execution_mode=['eager', 'on_wait'],
+      hbm_memory_space=[pltpu.HBM, pl.ANY],
   )
   def test_allocate_shared_buffer_in_core_map_with_race(
-      self, slow_core, dma_execution_mode
+      self, slow_core, dma_execution_mode, hbm_memory_space
   ):
     mesh = pltpu.create_tensorcore_mesh('x', num_cores=2)
 
@@ -818,7 +836,7 @@ class InterpretTest(jtu.JaxTestCase):
 
           pl.run_scoped(
               body,
-              pltpu.HBM(x.shape, dtype=x.dtype),
+              hbm_memory_space(x.shape, x.dtype),
               pltpu.VMEM(y.shape, dtype=y.dtype),
               pltpu.VMEM((y.shape[0], y.shape[0]), dtype=y.dtype),
           )
@@ -1261,9 +1279,69 @@ class InterpretTest(jtu.JaxTestCase):
           pallas_load_and_store,
           jnp.zeros((8, 128), jnp.float32),
           in_memory_space=pltpu.VMEM,
-          out_memory_space=pltpu.HBM,
+          out_memory_space=disallowed_memory_space,
       )
     pltpu.reset_tpu_interpret_mode_state()
+
+  def test_run_scoped_with_memory_space_is_none(self):
+    self.skipTest(
+        'Fails with a `KeyError` because the TPU kernel interpreter considers'
+        ' refs in a DMA that have memory space set to `None` to be HBM.'
+    )
+    shape = (8, 128)
+    dtype = jnp.float32
+
+    def _kernel(o_ref):
+      def body(vmem_ref):
+        pltpu.sync_copy(vmem_ref, o_ref)
+
+      pl.run_scoped(
+          body,
+          pltpu.VMEM(shape, dtype),
+      )
+
+    y = pl.pallas_call(
+        _kernel,
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
+        # `None` is interpreted to mean VMEM.
+        out_specs=pl.BlockSpec(memory_space=None),
+        grid=(1,),
+        interpret=pltpu.InterpretParams(
+            allow_hbm_allocation_in_run_scoped=True,
+            uninitialized_memory='zero',
+        ),
+    )()
+    # The output buffer is expected to be all zeros since it holds the values of
+    # the zero-initialized VMEM buffer that was allocated in `run_scoped`.
+    np.testing.assert_array_equal(y, jnp.zeros(shape, dtype=dtype))
+
+  @parameterized.parameters(pltpu.HBM, pl.ANY)
+  def test_store_to_half_of_hbm_output_buffer(self, hbm_memory_space):
+    x = jnp.arange(16, dtype=jnp.int32)
+
+    def _kernel(x_ref, o_ref):
+      pltpu.sync_copy(x_ref.at[:8], o_ref.at[8:])
+
+    def kernel_call(x):
+      return pl.pallas_call(
+          _kernel,
+          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          grid=(1,),
+          out_specs=pl.BlockSpec(memory_space=hbm_memory_space),
+          in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
+          input_output_aliases={0: 0},
+          interpret=pltpu.InterpretParams(
+              uninitialized_memory='zero'),
+      )(x)
+
+    y = kernel_call(x)
+    # This test used to fail for `hbm_memory_space=pltpu.HBM` since the
+    # interpreter erroneously allocated a fresh buffer for the output, which was
+    # zero-initialized (because of the `uninitialized_memory='zero'` argument
+    # that is passed to the interpreter), thus effectively ignoring the
+    # `input_output_aliases={0: 0}` argument.
+    np.testing.assert_array_equal(y[:8], x[:8])
+    np.testing.assert_array_equal(y[8:], x[:8])
 
 
 if __name__ == '__main__':
