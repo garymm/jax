@@ -44,7 +44,7 @@ from jax._src import prng
 from jax.sharding import (PartitionSpec as P, Mesh, auto_axes, explicit_axes,
                           AbstractDevice)
 from jax.experimental import multihost_utils
-from jax._src.shard_map import shard_map
+from jax._src.shard_map import shard_map, top_level_all_gather
 from jax._src.compilation_cache import is_persistent_cache_enabled
 from jax.experimental import primal_tangent_dtype
 from jax._src import array
@@ -10456,6 +10456,86 @@ class ShardingInTypesTest(jtu.JaxTestCase):
 
     jaxpr = f.trace(arr1, arr2).jaxpr
     jax.core.eval_jaxpr(jaxpr, (), arr1, arr2)  # doesn't crash
+
+  @jtu.with_explicit_mesh((2,), 'x')
+  def test_top_level_ag_basic(self, mesh):
+    arr = jax.device_put(np.arange(8.), P('x'))
+
+    @jax.jit
+    def f(x):
+      return top_level_all_gather(x, P(reduced={'x'}))
+
+    out = f(arr)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P(None, reduced={'x'})))
+    self.assertArraysEqual(out, arr)
+    for s in out.addressable_shards:
+      self.assertArraysEqual(s.data, np.arange(8.))
+
+  @config.remove_size_one_mesh_axis_from_type(True)
+  @jtu.with_explicit_mesh((1, 1), ('x', 'y'))
+  def test_top_level_ag_no_one_size_mesh_axis(self, mesh):
+    arr = jax.device_put(np.arange(8).reshape(4, 2), P('x', 'y'))
+
+    @jax.jit
+    def f(x):
+      return top_level_all_gather(x, P())  # no-op since P() -> P()
+
+    out = f(arr)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P(None, None)))
+    self.assertArraysEqual(out, arr)
+    for s in out.addressable_shards:
+      self.assertArraysEqual(s.data, np.arange(8).reshape(4, 2))
+
+  @parameterized.parameters(
+      ((8, 2), P('x', 'y'), P(None, None, reduced={'x', 'y'}), True),
+      ((8, 2), P('x', 'y'), P('x', None, reduced={'y'}), False),
+      ((8, 2), P('x', 'y'), P(None, 'y', reduced={'x'}), False),
+      ((8, 2), P(('x', 'y'), None), P(None, None, reduced={'x', 'y'}), False),
+      ((8, 2), P(('x', 'y'), None), P('x', None, reduced={'y'}), False),
+      ((8, 2), P(('y', 'x'), None), P('y', None, reduced={'x'}), False),
+      ((8, 2), P(('x', 'y'), 'z'), P('x', None, reduced={'y', 'z'}), True),
+      ((8, 2), P(('x', 'y'), 'z'), P(None, 'z', reduced={'x', 'y'}), False),
+  )
+  @jtu.with_explicit_mesh((2, 2, 2), ('x', 'y', 'z'))
+  def test_top_level_ag_multi(self, shape, in_spec, out_spec, multi_dim, mesh):
+    np_inp = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
+    arr = jax.device_put(np_inp, in_spec)
+
+    @jax.jit
+    def f(x):
+      return top_level_all_gather(x, out_spec, multi_dim=multi_dim)
+
+    out = f(arr)
+    self.assertEqual(out.shape, arr.shape)
+    self.assertEqual(out.sharding, NamedSharding(mesh, out_spec))
+    self.assertArraysEqual(out, arr)
+
+    out = jax.jit(jax.grad(lambda x: f(x).sum()))(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+
+    @jax.jit
+    def g(x):
+      return jax.reshard(x, out_spec)
+
+    expected_out = jax.jit(jax.grad(lambda x: g(x).sum()))(arr)
+    self.assertEqual(out.sharding, arr.sharding)
+    self.assertArraysEqual(out, expected_out)
+
+  @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
+  def test_top_level_ag_error(self, mesh):
+    arr = jax.device_put(np.arange(16).reshape(8, 2), P(None, 'y'))
+    with self.assertRaisesRegex(ValueError, "input.*to be unsharded"):
+      top_level_all_gather(arr, P('x', 'y'))
+
+    arr = jax.device_put(np.arange(16).reshape(8, 2), P('x', 'y'))
+    with self.assertRaisesRegex(
+        ValueError, "multiple dimensions cannot be all_gathered"):
+      top_level_all_gather(arr, P())
+
+    arr = jax.device_put(np.arange(16).reshape(8, 2), P(('x', 'y'), None))
+    with self.assertRaisesRegex(
+        ValueError, "maintains.*property.*prefix of in_spec"):
+      top_level_all_gather(arr, P('y', None))
 
 
 @jtu.pytest_mark_if_available('multiaccelerator')
