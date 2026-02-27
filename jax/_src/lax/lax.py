@@ -4018,10 +4018,14 @@ def broadcasting_sharding_rule(name, *avals):
                 f'{", ".join(map(str, map(tuple, specs)))}.')
   return NamedSharding(mesh, P(*result_specs))
 
-def nary_reduced_rule(out_s, *avals, **params):
-  non_empty_avals = [a for a in avals if a.shape]
-  specs = [a.sharding.spec for a in non_empty_avals]
+def replicated_axes(sh, mesh):
+  flat_spec = frozenset(s for s in flatten_spec(sh.spec) if s is not None)
+  return frozenset(mesh.axis_names) - (
+      flat_spec | sh.spec.unreduced | sh.spec.reduced)
 
+def nary_reduced_rule(out_s, *avals, **params):
+  cur_mesh = get_abstract_mesh()
+  specs = [a.sharding.spec for a in avals]
   reduced_spec = {s.reduced for s in specs if s.reduced}
   if len(reduced_spec) > 1:
     raise core.ShardingTypeError(
@@ -4029,10 +4033,10 @@ def nary_reduced_rule(out_s, *avals, **params):
         f' {reduced_spec}')
   reduced_s, = reduced_spec if reduced_spec else (frozenset(),)
   if reduced_s:
-    for a in non_empty_avals:
+    for a in avals:
       s = a.sharding.spec
       flat_spec = flatten_spec(s)
-      if a.sharding.replicated_axes & reduced_s:
+      if replicated_axes(a.sharding, cur_mesh) & reduced_s:
         raise core.ShardingTypeError(
             'Inputs cannot be replicated on the same axes that another input'
             f' is reduced on. Got input spec: {s} and reduced spec: {reduced_s}')

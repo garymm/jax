@@ -10553,6 +10553,28 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     arr = jax.reshard(inp, P('y', unreduced={'x'}))
     self.assertArraysEqual(jax.reshard(arr, P('y')), inp)
 
+  @jtu.with_explicit_mesh((2,), 'x')
+  def test_reduced_mul_scalar_fwd(self, mesh):
+    arr = jax.device_put(jnp.arange(4), P(reduced={'x'}))
+    with self.assertRaisesRegex(
+        core.ShardingTypeError,
+        "Inputs cannot be replicated on.*same axes.*another input is reduced"):
+      jax.jit(lambda x: x * 2)(arr)
+
+    arr2 = jax.device_put(jnp.arange(4), P())
+    with self.assertRaisesRegex(
+        core.ShardingTypeError,
+        "Inputs cannot be replicated on.*same axes.*another input is reduced"):
+      jax.jit(lambda x, y: x * y)(arr, arr2)
+
+  @jtu.with_explicit_mesh((2,), 'x')
+  def test_unreduced_mul_scalar_fwd(self, mesh):
+    arr = jax.reshard(jnp.arange(4), P(unreduced={'x'}))
+    with self.assertRaisesRegex(
+        core.ShardingTypeError,
+        "RHS should be reduced along the same axes LHS is unreduced on"):
+      jax.jit(lambda x: x * 2)(arr)
+
 
 @jtu.pytest_mark_if_available('multiaccelerator')
 class PJitErrorTest(jtu.JaxTestCase):
