@@ -379,6 +379,18 @@ def _reduce_resource_estimator(
   return Resources(smem_scratch_bytes=ctx.reduction_scratch_bytes)
 
 
+
+@_register_resource_estimator(primitives.jaxpr_call_p)
+def _jaxpr_call_resource_estimator(
+    ctx: ResourceEstimatorContext,
+    *args,
+    jaxpr: jax_core.Jaxpr,
+    **params
+):
+  del args, params  # Unused.
+  return _estimate_resources(ctx, jaxpr)
+
+
 @dataclasses.dataclass(frozen=True)
 class _AxisNames:
   grid: Sequence[Hashable]
@@ -773,7 +785,6 @@ def lower_pipelined_jaxpr_to_module(
   )
 
   from jax._src.pallas.mosaic_gpu import pipeline  # pytype: disable=import-error
-  from jax._src.pallas.mosaic_gpu import primitives as gpu_primitives  # pytype: disable=import-error
 
   def ref_for_aval(aval: ShapedAbstractValue):
     if isinstance(aval, gpu_core.WGMMAAbstractAccumulatorRef):
@@ -806,7 +817,7 @@ def lower_pipelined_jaxpr_to_module(
           which_parallel, indices, [None] * sum(which_parallel)
       )
       assert len(refs) + len(scratch_refs) == len(jaxpr.invars)
-      return gpu_primitives.jaxpr_call(
+      return primitives._jaxpr_call(
           jaxpr, *refs, *scratch_refs, program_ids=program_ids_template
       )
 
@@ -4102,3 +4113,57 @@ def _delay_lowering(ctx: LoweringRuleContext, nanos):
 def _reshard_lowering_rule(ctx, x, dst_sharding, concrete_mesh):
   del ctx, dst_sharding, concrete_mesh
   return x
+
+
+@register_lowering_rule(primitives.jaxpr_call_p, mgpu.LoweringSemantics.Lane)
+@register_lowering_rule(primitives.jaxpr_call_p, mgpu.LoweringSemantics.Warpgroup)
+def _jaxpr_call_lowering_rule(
+    ctx: LoweringRuleContext,
+    *flat_args,
+    jaxpr: jax_core.Jaxpr,
+    ref_treedefs,
+    program_ids_treedef,
+):
+  args = []
+  flat_refs, flat_program_ids = util.split_list(
+      flat_args, [sum(treedef.num_leaves for treedef in ref_treedefs)]
+  )
+  flat_ref_avals, flat_program_ids_avals = util.split_list(
+      ctx.avals_in, [sum(treedef.num_leaves for treedef in ref_treedefs)]
+  )
+  del flat_program_ids_avals  # Unused.
+  flat_refs = util.split_list(
+      flat_refs,
+      [treedef.num_leaves for treedef in ref_treedefs[: len(ref_treedefs) - 1]],
+  )
+  flat_ref_avals = util.split_list(
+      flat_ref_avals,
+      [treedef.num_leaves for treedef in ref_treedefs[: len(ref_treedefs) - 1]],
+  )
+  for treedef, flat_ref, ref_aval in zip(
+      ref_treedefs, flat_refs, flat_ref_avals
+  ):
+    ref = treedef.unflatten(flat_ref)
+    ref_aval = treedef.unflatten(ref_aval)
+    if isinstance(ref, tuple):
+      ref, transforms = ref
+      ref_aval, transform_avals = ref_aval  # type: ignore
+      # We ignore other transforms here, because they are already embedded
+      # in the jaxpr.
+      assert isinstance(ref_aval, state_types.AbstractRef)
+      ref, _, _ = _handle_transforms(
+          ctx, ref_aval, ref, transform_avals, transforms,
+          handle_reshapes=False, handle_transposes=False
+      )
+    args.append(ref)
+  program_ids = program_ids_treedef.unflatten(flat_program_ids)
+  for axis, pid in enumerate(program_ids):
+    if pid is not None:
+      continue
+    program_ids[axis] = _program_id(
+        axis, ctx.module_ctx.squashed_dims, len(program_ids)
+    )
+  new_module_ctx = dataclasses.replace(ctx.module_ctx, program_ids=program_ids)
+  return lower_jaxpr_to_mosaic_gpu(
+      new_module_ctx, ctx.launch_ctx, jaxpr, args
+  )

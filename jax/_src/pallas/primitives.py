@@ -16,31 +16,32 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable, Sequence
 import enum
 import functools
+import itertools
 import math
 import string
 from typing import Any
 
-import jax._src.lax as lax
-from jax._src import tree_util
 from jax._src import ad_util
 from jax._src import api_util
-from jax._src import core as jax_core
 from jax._src import config
+from jax._src import core as jax_core
 from jax._src import debugging
 from jax._src import dtypes
-from jax._src import typing as jax_typing
 from jax._src import effects
 from jax._src import linear_util as lu
+from jax._src import numpy as jnp
 from jax._src import pretty_printer as pp
 from jax._src import source_info_util
 from jax._src import state
+from jax._src import tree_util
+from jax._src import typing as jax_typing
 from jax._src import util
 from jax._src.interpreters import ad
 from jax._src.interpreters import partial_eval as pe
+import jax._src.lax as lax
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
 from jax._src.pallas import core as pallas_core
@@ -50,7 +51,7 @@ from jax._src.state import indexing
 from jax._src.state import primitives as sp
 from jax._src.state import types as state_types
 from jax.interpreters import mlir
-from jax._src import numpy as jnp
+
 
 Slice = indexing.Slice
 NDIndexer = indexing.NDIndexer
@@ -1511,3 +1512,136 @@ def _delay_abstract_eval(nanos):
 def delay(nanos: int | jax_typing.Array) -> None:
   """Sleeps for the given number of nanoseconds."""
   delay_p.bind(nanos)
+
+
+jaxpr_call_p = jax_core.Primitive("jaxpr_call")
+jaxpr_call_p.multiple_results = True
+
+
+@jaxpr_call_p.def_effectful_abstract_eval
+def _jaxpr_call_abstract_eval(*args, jaxpr: jax_core.Jaxpr, **params):
+  del args, params  # Unused.
+  # Filter out input effects, since they are only relevant in the context
+  # of this ``jaxpr_call``.
+  out_effects = {
+      e for e in jaxpr.effects if not isinstance(e, effects.JaxprInputEffect)
+  }
+  return jaxpr.out_avals, out_effects
+
+
+def _jaxpr_call_pp_eqn(
+    eqn: jax_core.JaxprEqn,
+    context: jax_core.JaxprPpContext,
+    settings: jax_core.JaxprPpSettings,
+):
+  flat_args = eqn.invars
+  ref_treedefs = eqn.params["ref_treedefs"]
+  flat_refs, _ = util.split_list(
+      flat_args, [sum(treedef.num_leaves for treedef in ref_treedefs)]
+  )
+  flat_refs = util.split_list(
+      flat_refs,
+      [treedef.num_leaves for treedef in ref_treedefs[: len(ref_treedefs) - 1]],
+  )
+  trailer = []
+  for treedef, flat_ref in zip(ref_treedefs, flat_refs):
+    ref = treedef.unflatten(flat_ref)
+    transforms = []
+    if isinstance(ref, tuple):
+      ref, transforms = ref
+    trailer.append(pp.text(" "))
+    trailer.append(sp.pp_ref_transforms(context, ref, transforms))
+  return pp.concat([
+      pp.text("jaxpr_call"),
+      pp.text("["),
+      jax_core.pp_kv_pair("jaxpr", eqn.params["jaxpr"], context, settings),
+      pp.text("]"),
+      pp.concat(trailer),
+  ])
+
+
+jax_core.pp_eqn_rules[jaxpr_call_p] = _jaxpr_call_pp_eqn
+
+
+@state_discharge.register_partial_discharge_rule(jaxpr_call_p)
+def _jaxpr_call_discharge(
+    flat_should_discharge,
+    in_avals,
+    out_avals,
+    *flat_args,
+    jaxpr,
+    ref_treedefs,
+    program_ids_treedef,
+):
+  del in_avals, out_avals  # Unused.
+  flat_should_discharge = util.split_list(
+      flat_should_discharge,
+      [treedef.num_leaves for treedef in ref_treedefs[: len(ref_treedefs) - 1]],
+  )
+  should_discharge = [*map(any, flat_should_discharge)]
+  discharged_jaxpr, discharged_consts = state_discharge.discharge_state(
+      jaxpr, (), should_discharge=should_discharge
+  )
+  assert not discharged_consts
+  outs = jaxpr_call_p.bind(
+      *flat_args,
+      jaxpr=discharged_jaxpr,
+      ref_treedefs=tuple(ref_treedefs),
+      program_ids_treedef=program_ids_treedef,
+  )
+  discharged_outs_it = iter(outs[len(jaxpr.outvars) :])
+  new_in_vals = (
+      tuple(
+          itertools.chain.from_iterable(
+              [next(discharged_outs_it) if discharged else None]
+              * ref_treedefs[idx].num_leaves
+              for idx, discharged in enumerate(should_discharge)
+          )
+      )
+      + (None,) * program_ids_treedef.num_leaves
+  )
+  return new_in_vals, outs[: len(jaxpr.outvars)]
+
+
+def _jaxpr_call(
+    jaxpr: jax_core.Jaxpr,
+    *refs: state_types.AbstractRef | state_types.TransformedRef,
+    program_ids: Sequence[jax_typing.Array | None],
+) -> Sequence[jax_typing.Array]:
+  """Internal primitive for calling a kernel jaxpr inside ``emit_pipeline``.
+
+  This is *not* a general purpose primitive. In particular, it assumes that
+  the transformed references have been indexed.
+
+  Args:
+    jaxpr: The jaxpr to call.
+    *refs: The references to pass into the jaxpr.
+    program_ids: The loop-bound program IDs to pass into the jaxpr, or None if
+      the program ID corresponds to a parallel dimension.
+
+  Returns:
+    The outputs of the jaxpr.
+  """
+  assert not jaxpr.outvars
+  flat_refs = []
+  ref_treedefs = []
+  ref: Any
+  for ref in refs:
+    if isinstance(ref, state_types.TransformedRef):
+      if not isinstance(ref.transforms[-1], indexing.NDIndexer):
+        raise ValueError(
+            "TransformedRef must have been indexed before passing into"
+            f" jaxpr_call. Got {ref}."
+        )
+      ref = (ref.ref, ref.transforms)
+    flat_ref, treedef = tree_util.tree_flatten(ref)
+    flat_refs.extend(flat_ref)
+    ref_treedefs.append(treedef)
+  flat_program_ids, program_ids_treedef = tree_util.tree_flatten(program_ids)
+  return jaxpr_call_p.bind(
+      *flat_refs,
+      *flat_program_ids,
+      jaxpr=jaxpr,
+      ref_treedefs=tuple(ref_treedefs),
+      program_ids_treedef=program_ids_treedef,
+  )
