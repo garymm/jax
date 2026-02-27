@@ -2735,7 +2735,7 @@ class FragmentedArray:
       utils.warpgroup_barrier()
       for i, unreduced_index in enumerate(unreduced_indices):
         out_regs[unreduced_index] = reduce_stored(
-            reg_ty, i, lane_idx, swizzle_warp_idx  # pytype: disable=undefined-variable
+            reg_ty, i, lane_idx, swizzle_warp_idx  # pylint: disable=undefined-variable
         )
       utils.warpgroup_barrier()
     del unreduced_indices
