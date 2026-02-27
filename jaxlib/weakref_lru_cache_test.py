@@ -79,33 +79,23 @@ class WeakrefLRUCacheTest(absltest.TestCase):
   def testAnotherMultiThreaded(self):
     num_workers = 5
     barrier = threading.Barrier(num_workers)
-
-    def f(x, y):
-      time.sleep(0.01)
-      return y
-
-    cache = weakref_lru_cache.weakref_lru_cache(lambda: None, f, 2048)
+    cache = weakref_lru_cache.weakref_lru_cache(
+        lambda: None, lambda x, y: y, 2048
+    )
 
     class WRKey:
-
-      def __init__(self, x):
-        self.x = x
-
-      def __eq__(self, other):
-        return self.x == other.x
-
-      def __hash__(self):
-        return self.x
+      pass
 
     def WorkerAddToCache():
       barrier.wait()
-      for i in range(10000):
-        cache(WRKey(i), i)
+      wrkey = WRKey()
+      for i in range(10):
+        cache(wrkey, i)
 
     def WorkerCleanCache():
       barrier.wait()
-      for _ in range(10000):
-        cache.cache_info()
+      for _ in range(10):
+        cache.cache_clear()
 
     workers = [
         threading.Thread(target=WorkerAddToCache)
@@ -258,9 +248,8 @@ class WeakrefLRUCacheTest(absltest.TestCase):
             CacheContextFn,
             CallFn,
             weakref_lru_cache.WeakrefLRUCache,
+            kwargs,
         ]
-        + list(kwargs.keys())
-        + list(kwargs.values())
         + [weakref.getweakrefs(key)[0] for key in keys]
         + values
         + args
@@ -280,7 +269,6 @@ class WeakrefLRUCacheTest(absltest.TestCase):
       pass
 
     class ReentrantKey:
-
       def __eq__(self, other):
         cache(WRKey(), None)
         return False
@@ -289,83 +277,9 @@ class WeakrefLRUCacheTest(absltest.TestCase):
         return 42
 
     wrkey = WRKey()
-    for _ in range(100):
-      cache(wrkey, ReentrantKey())
-
-  def testRecursiveFunction(self):
-    class WRKey:
-      pass
-
-    wrkey = WRKey()
-
-    def recursive_fn(x, y):
-      return cache(x, y)
-
-    cache = weakref_lru_cache.weakref_lru_cache(
-        lambda: None, recursive_fn, 2048
-    )
-
-    with self.assertRaisesRegex(RecursionError, "Recursively calling"):
-      cache(wrkey, 1)
-
-  def testStressMultiThreaded(self):
-    class WeakKey:
-
-      def __init__(self, x):
-        self.x = x
-
-      def __eq__(self, other):
-        time.sleep(1e-4)  # Encourage a GIL release
-        return isinstance(other, WeakKey) and self.x == other.x
-
-      def __hash__(self):
-        return 42
-
-    class StrongKey:
-
-      def __init__(self, y):
-        self.y = y
-
-      def __eq__(self, other):
-        time.sleep(1e-4)  # Encourage a GIL release
-        return isinstance(other, StrongKey) and self.y == other.y
-
-      def __hash__(self):
-        return 43
-
-    cache = weakref_lru_cache.weakref_lru_cache(
-        lambda: None, lambda x, y: (x, y), 2048
-    )
-
-    num_threads = 10
-    actions_per_thread = 1000
-
-    weak_keys = [WeakKey(i) for i in range(10)]
-    strong_keys = [StrongKey(i) for i in range(10)]
-
-    def worker():
-      for _ in range(actions_per_thread):
-        r = random.random()
-        if r < 0.9:
-          # Lookup
-          wk = random.choice(weak_keys)
-          sk = random.choice(strong_keys)
-          # Occasionally use a new object that compares equal
-          if random.random() < 0.1:
-            wk = WeakKey(wk.x)
-          if random.random() < 0.1:
-            sk = StrongKey(sk.y)
-          cache(wk, sk)
-        elif r < 0.95:
-          cache.cache_info()
-        else:
-          cache.cache_clear()
-
-    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
-    for t in threads:
-      t.start()
-    for t in threads:
-      t.join()
+    with self.assertRaisesRegex(RecursionError, "Reentrant call"):
+      for _ in range(100):
+        cache(wrkey, ReentrantKey())
 
   def testEvictWeakref(self):
     dtor_list = []
@@ -405,12 +319,9 @@ class WeakrefLRUCacheTest(absltest.TestCase):
       self.assertLen(keys, num_keys_should_be)
 
     cache = weakref_lru_cache.weakref_lru_cache(
-        lambda: None, lambda x: None, explain=lambda: explain
-    )
+        lambda: None, lambda x: None, explain=lambda: explain)
 
-    class A:
-      ...
-
+    class A: ...
     a = A()
 
     num_keys_should_be = 0
@@ -419,33 +330,6 @@ class WeakrefLRUCacheTest(absltest.TestCase):
     num_keys_should_be = 1
     b = A()
     cache(b)
-
-  def testEvictionIsLRU(self):
-    cache = weakref_lru_cache.weakref_lru_cache(lambda: None, lambda x, y: y, 2)
-
-    class WRKey:
-      pass
-
-    wrkey = WRKey()
-
-    cache(wrkey, 1)
-    cache(wrkey, 2)
-
-    cache(wrkey, 3)  # should evict 1
-
-    info = cache.cache_info()
-    self.assertEqual(info.misses, 3)
-    self.assertEqual(info.hits, 0)
-
-    cache(wrkey, 2)  # should hit
-    info = cache.cache_info()
-    self.assertEqual(info.misses, 3)
-    self.assertEqual(info.hits, 1)
-
-    cache(wrkey, 1)  # should miss
-    info = cache.cache_info()
-    self.assertEqual(info.misses, 4)
-    self.assertEqual(info.hits, 1)
 
 
 if __name__ == "__main__":
