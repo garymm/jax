@@ -198,8 +198,8 @@ class CustomCallBackendConfig:
         or self.lowered_module_asm_version > version
     )
     with mlir.make_ir_context() as ctx, ir.Location.unknown():
-      module = ir.Module.parse(self.lowered_module_asm)
       ctx.allow_unregistered_dialects = True
+      module = ir.Module.parse(self.lowered_module_asm)
       pipeline = PassManager.parse(
           "builtin.module(mosaic-serde{serialize=false},mosaic-serde{serialize=true"
           f" target-version={version}}})",
