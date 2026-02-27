@@ -10537,6 +10537,22 @@ class ShardingInTypesTest(jtu.JaxTestCase):
         ValueError, "maintains.*property.*prefix of in_spec"):
       top_level_all_gather(arr, P('y', None))
 
+  @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
+  def test_reshard_replicated_to_sharded_unreduced(self, mesh):
+    if jaxlib_extension_version < 411:
+      self.skipTest('Requires jaxlib_extension_version >= 411')
+    if ifrt_version < 50:
+      self.skipTest('Requires ifrt_version >= 50')
+    if not jtu.is_cloud_tpu_at_least(2026, 3, 1):
+      self.skipTest('Requires a newer libtpu')
+
+    inp = jnp.arange(16).reshape(8, 2)
+    arr = jax.reshard(inp, P('x', unreduced={'y'}))
+    self.assertArraysEqual(jax.reshard(arr, P('x')), inp)
+
+    arr = jax.reshard(inp, P('y', unreduced={'x'}))
+    self.assertArraysEqual(jax.reshard(arr, P('y')), inp)
+
 
 @jtu.pytest_mark_if_available('multiaccelerator')
 class PJitErrorTest(jtu.JaxTestCase):
