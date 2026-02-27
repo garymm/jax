@@ -1006,7 +1006,22 @@ void* AddOffset(void* ptrs, int64_t offset) {
 absl::Status MosaicGpuPrepare(
     const xla::gpu::CollectiveParams* absl_nullable collective_params,
     xla::gpu::CollectiveCliqueRequests* absl_nullable clique_requests,
-    xla::ffi::Dictionary attributes) {
+    CustomCallResources* resources, xla::ffi::Dictionary attributes) {
+  // Module initialization calls cuModuleLoadData to load the PTX into the GPU.
+  // CUDA has a system-wide mutex around this call which can cause a deadlock
+  // if user tries to load the module on one GPU while another GPU is executing
+  // the same module. To prevent this we need to initialize all modules used
+  // by several devices before the first execution.
+  // See more details:
+  // https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/lazy-loading.html#impact-on-concurrent-kernel-execution
+  // This operation should be done at Prepare stage since XLA launches a
+  // rendez-vous between Prepare and Initialize, which we need here to make sure
+  // that modules were loaded on all devices before the first execution.
+  // TODO(b/481949311): Store kernel_ctx in a thunk state to avoid CachedInit
+  // call at execution time.
+  TF_ASSIGN_OR_RETURN(void* kernel_ctx, CachedInit(resources->kernel));
+  CHECK_NOTNULL(kernel_ctx);
+
   if (!ModuleUsesCollectiveMetadata(attributes)) {
     return absl::OkStatus();
   }
@@ -1021,6 +1036,7 @@ absl::Status MosaicGpuPrepare(
       GetCliqueDeviceGroups(*collective_params, attributes));
 
   TF_RETURN_IF_ERROR(clique_requests->RequestClique(clique_key, device_groups));
+
   VLOG(6) << "Prepare is done for clique key: " << clique_key;
   return absl::OkStatus();
 }
@@ -1168,7 +1184,7 @@ absl::Status MosaicGpuExecute(
   }
 
   CompiledKernel* kernel = resources->kernel;
-  TF_ASSIGN_OR_RETURN(auto ctx, CachedInit(kernel));
+  TF_ASSIGN_OR_RETURN(void* kernel_ctx, CachedInit(kernel));
 
   cudaStream_t cuda_stream =
       reinterpret_cast<cudaStream_t>(stream->platform_specific_handle().stream);
@@ -1208,7 +1224,7 @@ absl::Status MosaicGpuExecute(
   }
 
   void** buffers_data = buffer_ptrs.data();
-  kernel->host_launch(ctx, cuda_stream, buffers_data);
+  kernel->host_launch(kernel_ctx, cuda_stream, buffers_data);
   return absl::OkStatus();
 }
 
@@ -1216,6 +1232,7 @@ XLA_FFI_DEFINE_HANDLER(kMosaicGpuPrepare, MosaicGpuPrepare,
                        ffi::Ffi::BindPrepare()
                            .Ctx<ffi::CollectiveParams>()
                            .Ctx<ffi::CollectiveCliqueRequests>()
+                           .Ctx<xla::ffi::State<CustomCallResources>>()
                            .Attrs());
 
 XLA_FFI_DEFINE_HANDLER(
