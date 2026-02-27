@@ -434,7 +434,7 @@ def single_thread_predicate(scope: ThreadSubset = ThreadSubset.BLOCK):
       example, if the scope is BLOCK, only one thread per block will be
       selected.
   """
-  elected = nvvm.elect_sync(ir.IntegerType.get_signless(1))
+  elected = nvvm.elect_sync()
   if scope == ThreadSubset.WARP:
     return elected
   warp = warp_idx()
@@ -1071,7 +1071,7 @@ class BarrierRef:
             "Predicate not supported for no-complete arrive"
         )
       count = c(arrival_count, ir.IntegerType.get_signless(32))
-      nvvm.mbarrier_arrive_nocomplete(i64, self.get_ptr(), count)
+      nvvm.mbarrier_arrive_nocomplete(self.get_ptr(), count)
 
   def arrive_expect_tx(
       self, bytes: int | ir.Value, predicate: ir.Value | None = None
@@ -1795,7 +1795,7 @@ def redux(x: ir.Value, mask: ir.Value, kind: ReductionKind):  # type: ignore
   extra_kwargs = {}
   if kind == ReductionKind.FMAX or kind == ReductionKind.FMIN:
     extra_kwargs = dict(nan=True)
-  return nvvm.redux_sync(x.type, x, kind, mask, **extra_kwargs)
+  return nvvm.redux_sync(x, kind, mask, **extra_kwargs)
 
 
 def prmt(high: ir.Value, low: ir.Value, permutation: ir.Value):

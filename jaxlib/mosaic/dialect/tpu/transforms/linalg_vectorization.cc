@@ -534,7 +534,7 @@ void LinalgVectorizationPass::runOnOperation() {
       linalgOps.push_back(op);
     }
   });
-  if (failed(applyOpPatternsAndFold(linalgOps, std::move(patterns)))) {
+  if (failed(applyOpPatternsGreedily(linalgOps, std::move(patterns)))) {
     return signalPassFailure();
   }
 }
