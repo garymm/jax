@@ -21,10 +21,10 @@ limitations under the License.
 #include <string_view>
 #include <utility>
 
+#include "absl/log/check.h"
 #include "absl/status/statusor.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/stl/string_view.h"  // IWYU pragma: keep
-#include "xla/tsl/platform/logging.h"
 #include "xla/util.h"
 #include "tsl/platform/protobuf.h"
 #include "tsl/profiler/protobuf/profile.pb.h"

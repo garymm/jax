@@ -25,7 +25,6 @@ cc_binary(
     deps = [
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
-        "@tsl//tsl/platform:logging",
         "@tsl//tsl/platform:platform_port",
         "@xla//xla:literal",
         "@xla//xla:literal_util",

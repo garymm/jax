@@ -55,7 +55,6 @@ limitations under the License.
 #include "xla/service/hlo_module_config.h"
 #include "xla/tools/hlo_module_loader.h"
 #include "tsl/platform/init_main.h"
-#include "tsl/platform/logging.h"
 
 int main(int argc, char** argv) {
   tsl::port::InitMain("", &argc, &argv);

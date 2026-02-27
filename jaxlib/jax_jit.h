@@ -39,7 +39,6 @@ limitations under the License.
 #include "jaxlib/pytree.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_layout.h"
-#include "xla/tsl/platform/logging.h"
 
 namespace jax {
 

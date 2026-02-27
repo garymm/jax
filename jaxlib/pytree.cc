@@ -37,6 +37,7 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/hash/hash.h"
+#include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -53,7 +54,6 @@ limitations under the License.
 #include "jaxlib/nb_class_ptr.h"
 #include "jaxlib/pytree.pb.h"
 #include "xla/pjrt/exceptions.h"
-#include "xla/tsl/platform/logging.h"
 
 namespace jax {
 

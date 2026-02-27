@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "nanobind/nanobind.h"
@@ -31,7 +32,6 @@ limitations under the License.
 #include "nanobind/stl/string.h"  // IWYU pragma: keep
 #include "nanobind/typing.h"
 #include "jaxlib/python_ref_manager.h"
-#include "xla/tsl/platform/logging.h"
 
 namespace jax {
 

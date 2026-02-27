@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "absl/container/inlined_vector.h"
 #include "absl/hash/hash.h"
+#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -72,7 +73,6 @@ limitations under the License.
 #include "xla/tsl/lib/strings/proto_serialization.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/errors.h"
-#include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"

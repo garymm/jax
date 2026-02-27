@@ -64,7 +64,6 @@ limitations under the License.
 #include "xla/python/nb_absl_inlined_vector.h"  // IWYU pragma: keep
 #include "xla/python/nb_absl_span.h"  // IWYU pragma: keep
 #include "xla/python/types.h"
-#include "xla/tsl/platform/logging.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace jax {

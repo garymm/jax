@@ -46,7 +46,6 @@ limitations under the License.
 #include "xla/python/ifrt/device_list.h"
 #include "xla/python/nb_numpy.h"
 #include "xla/python/safe_static_init.h"
-#include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
 

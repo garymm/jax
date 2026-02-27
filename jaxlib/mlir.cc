@@ -47,7 +47,6 @@ limitations under the License.
 #include "xla/python/version.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/tsl/platform/errors.h"
-#include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
 
 namespace nb = nanobind;

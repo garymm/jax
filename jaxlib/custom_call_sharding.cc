@@ -27,6 +27,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "nanobind/nanobind.h"
@@ -45,7 +46,6 @@ limitations under the License.
 #include "xla/python/custom_partition_callback.h"
 #include "xla/python/inspect_sharding.h"
 #include "xla/shape.h"
-#include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 
