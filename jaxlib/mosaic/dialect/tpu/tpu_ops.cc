@@ -337,69 +337,141 @@ LogicalResult MemRefSqueezeOp::verify() {
   return success();
 }
 
-LogicalResult MemRefSqueezeOp::canonicalize(MemRefSqueezeOp op,
-                                            PatternRewriter &rewriter) {
-  auto source_type = getMemRefType(op.getInput());
-  auto target_type = op.getType();
-  auto erase_layout = op.getInput().getDefiningOp<tpu::EraseLayoutOp>();
-  if (!erase_layout) {
-    return failure();
-  }
+struct MemRefSqueezeEraseLayout : public OpRewritePattern<MemRefSqueezeOp> {
+  using OpRewritePattern::OpRewritePattern;
 
-  auto layout_ref = erase_layout.getOperand();
-  MemRefType layout_ty = getMemRefType(layout_ref);
-  auto layout_attr = dyn_cast<tpu::TiledLayoutAttr>(layout_ty.getLayout());
-  if (!layout_attr) {
-    return failure();
-  }
+  LogicalResult matchAndRewrite(MemRefSqueezeOp op,
+                                PatternRewriter& rewriter) const override {
+    auto source_type = getMemRefType(op.getInput());
+    auto target_type = op.getType();
+    auto erase_layout = op.getInput().getDefiningOp<tpu::EraseLayoutOp>();
+    if (!erase_layout) {
+      return failure();
+    }
 
-  auto source_shape = source_type.getShape();
-  auto target_shape = target_type.getShape();
-  auto squeezed_or = computeSqueezedDimsChecked(op, source_shape, target_shape);
-  if (failed(squeezed_or)) {
-    return failure();
-  }
-  auto &squeezed = squeezed_or.value();
-  if (squeezed.empty() && source_shape != target_shape) {
-    return failure();
-  }
+    auto layout_ref = erase_layout.getOperand();
+    MemRefType layout_ty = getMemRefType(layout_ref);
+    auto layout_attr = dyn_cast<tpu::TiledLayoutAttr>(layout_ty.getLayout());
+    if (!layout_attr) {
+      return failure();
+    }
 
-  SmallVector<int64_t> tile_strides =
-      llvm::to_vector(layout_attr.getTileStrides());
-  for (int i = squeezed.size() - 1; i >= 0; --i) {
-    tile_strides.erase(tile_strides.begin() + squeezed[i]);
-  }
+    auto source_shape = source_type.getShape();
+    auto target_shape = target_type.getShape();
+    auto squeezed_or =
+        computeSqueezedDimsChecked(op, source_shape, target_shape);
+    if (failed(squeezed_or)) {
+      return failure();
+    }
+    auto& squeezed = squeezed_or.value();
+    if (squeezed.empty() && source_shape != target_shape) {
+      return failure();
+    }
 
-  tpu::TiledLayoutAttr new_layout;
-  bool target_is_1d = target_shape.size() == 1;
-  auto tiles = layout_attr.getTiles();
-  if (target_is_1d && tiles.size() == 1) {
-    auto tile_dims = llvm::to_vector(tiles.front().dimensions());
-    int first_tiled = source_shape.size() - tile_dims.size();
+    SmallVector<int64_t> tile_strides =
+        llvm::to_vector(layout_attr.getTileStrides());
     for (int i = squeezed.size() - 1; i >= 0; --i) {
-      int dim = squeezed[i];
-      if (dim >= first_tiled) {
-        int tile_idx = dim - first_tiled;
-        if (tile_idx < 0 || tile_idx >= static_cast<int>(tile_dims.size())) {
-          return op.emitError() << "Internal error: tile index out of bounds.";
+      tile_strides.erase(tile_strides.begin() + squeezed[i]);
+    }
+
+    tpu::TiledLayoutAttr new_layout;
+    bool target_is_1d = target_shape.size() == 1;
+    auto tiles = layout_attr.getTiles();
+    if (target_is_1d && tiles.size() == 1) {
+      auto tile_dims = llvm::to_vector(tiles.front().dimensions());
+      int first_tiled = source_shape.size() - tile_dims.size();
+      for (int i = squeezed.size() - 1; i >= 0; --i) {
+        int dim = squeezed[i];
+        if (dim >= first_tiled) {
+          int tile_idx = dim - first_tiled;
+          if (tile_idx < 0 || tile_idx >= static_cast<int>(tile_dims.size())) {
+            return op.emitError()
+                   << "Internal error: tile index out of bounds.";
+          }
+          tile_dims.erase(tile_dims.begin() + tile_idx);
         }
-        tile_dims.erase(tile_dims.begin() + tile_idx);
+      }
+      new_layout = tpu::TiledLayoutAttr::get(
+          op.getContext(), {xla::Tile(tile_dims)}, tile_strides);
+    } else {
+      new_layout = tpu::TiledLayoutAttr::get(
+          op.getContext(), layout_attr.getTiles(), tile_strides);
+    }
+
+    auto new_ty = MemRefType::get(target_shape, layout_ty.getElementType(),
+                                  new_layout, layout_ty.getMemorySpace());
+
+    auto new_squeeze =
+        MemRefSqueezeOp::create(rewriter, op.getLoc(), new_ty, layout_ref);
+    rewriter.replaceOpWithNewOp<tpu::EraseLayoutOp>(op, new_squeeze);
+    return success();
+  }
+};
+
+// Rewrites
+//
+//   tpu.memref_squeeze(memref.cast(x))
+//
+// to
+//
+//   memref.cast(tpu.memref_squeeze(x))
+//
+// when the cast widens static dimensions to dynamic.
+struct MemRefSqueezeFoldCast : public OpRewritePattern<MemRefSqueezeOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MemRefSqueezeOp op,
+                                PatternRewriter& rewriter) const override {
+    auto cast_op = op.getInput().getDefiningOp<memref::CastOp>();
+    if (!cast_op) {
+      return failure();
+    }
+
+    TypedValue<BaseMemRefType> cast_source = cast_op.getSource();
+    auto cast_source_type = cast<MemRefType>(cast_source.getType());
+    auto cast_result_type = cast<MemRefType>(cast_op.getType());
+    if (cast_source_type.getRank() != cast_result_type.getRank()) {
+      return failure();
+    }
+    for (auto [source_dim, result_dim] :
+         llvm::zip(cast_source_type.getShape(), cast_result_type.getShape())) {
+      if (source_dim == result_dim) continue;
+      if (ShapedType::isDynamic(source_dim) &&
+          !ShapedType::isDynamic(result_dim)) {
+        // The result type must be more dynamic than the source type.
+        return failure();
       }
     }
-    new_layout = tpu::TiledLayoutAttr::get(
-        op.getContext(), {xla::Tile(tile_dims)}, tile_strides);
-  } else {
-    new_layout = tpu::TiledLayoutAttr::get(
-        op.getContext(), layout_attr.getTiles(), tile_strides);
+
+    MemRefType result_type = op.getType();
+    FAILUREOR_ASSIGN_OR_RETURN(
+        SmallVector<int> squeezed,
+        computeSqueezedDimsChecked(op, cast_result_type.getShape(),
+                                   result_type.getShape()));
+
+    SmallVector<int64_t> new_result_shape;
+    for (auto [i, dim] : llvm::enumerate(cast_source_type.getShape())) {
+      if (!absl::c_contains(squeezed, i)) {
+        new_result_shape.push_back(dim);
+      }
+    }
+    CHECK_EQ(new_result_shape.size(), result_type.getRank());
+    if (result_type.getShape() == ArrayRef<int64_t>(new_result_shape)) {
+      return failure();
+    }
+
+    MemRefType new_result_type =
+        MemRefType::Builder(result_type).setShape(new_result_shape);
+    auto new_squeeze = MemRefSqueezeOp::create(rewriter, op.getLoc(),
+                                               new_result_type, cast_source);
+    rewriter.replaceOpWithNewOp<memref::CastOp>(op, result_type, new_squeeze);
+    return success();
   }
+};
 
-  auto new_ty = MemRefType::get(target_shape, layout_ty.getElementType(),
-                                new_layout, layout_ty.getMemorySpace());
-
-  auto new_squeeze =
-      MemRefSqueezeOp::create(rewriter, op.getLoc(), new_ty, layout_ref);
-  rewriter.replaceOpWithNewOp<tpu::EraseLayoutOp>(op, new_squeeze);
-  return success();
+void MemRefSqueezeOp::getCanonicalizationPatterns(RewritePatternSet& results,
+                                                  MLIRContext* context) {
+  results.add<MemRefSqueezeEraseLayout, MemRefSqueezeFoldCast>(context);
 }
 
 LogicalResult RelayoutOp::verify() {

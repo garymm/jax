@@ -1120,7 +1120,7 @@ def TPU_MemRefSqueezeOp : TPU_Op<"memref_squeeze", [Pure]> {
     $input attr-dict `:` type($input) `->` type($result)
   }];
   let hasVerifier = 1;
-  let hasCanonicalizeMethod = 1;
+  let hasCanonicalizer = 1;
 }
 
 def TPU_MemRefReshapeOp : TPU_Op<"memref_reshape", [Pure]> {
