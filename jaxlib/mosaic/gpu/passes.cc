@@ -227,9 +227,9 @@ class LLVMAttrInsertionPass
   }
 };
 
-// Replaces all "pallas_call" locations within a FuncOp with the location
-// of the first operation in the function that has a different location.
-// This provides more specific source information for debugging.
+// Replaces all "pallas_call"/"mpmd_map" locations within a FuncOp with the
+// location of the first operation in the function that has a different
+// location. This provides more specific source information for debugging.
 class ResolveTrivialLocationsPass
     : public jaxlib::mlir::Pass<ResolveTrivialLocationsPass, mlir::ModuleOp> {
  public:
@@ -239,14 +239,23 @@ class ResolveTrivialLocationsPass
   static constexpr llvm::StringLiteral kPassName =
       "ResolveTrivialLocationsPass";
 
+  static bool isTrivialLocation(mlir::Location loc) {
+    auto name_loc = mlir::dyn_cast<mlir::NameLoc>(loc);
+    if (!name_loc) {
+      return false;
+    }
+    llvm::StringRef name = name_loc.getName().getValue();
+    name.consume_back(":");
+    if (name != "pallas_call" && name != "mpmd_map") {
+      return false;
+    }
+    return mlir::isa<mlir::UnknownLoc>(name_loc.getChildLoc()) ||
+           isTrivialLocation(name_loc.getChildLoc());
+  }
+
   void runOnOperation() override {
-    const auto trivial_loc =
-        mlir::NameLoc::get(mlir::StringAttr::get(&getContext(), "pallas_call"));
-    const auto trivial_loc2 = mlir::NameLoc::get(
-        mlir::StringAttr::get(&getContext(), "pallas_call:"), trivial_loc);
     getOperation()->walk([&](mlir::func::FuncOp func_op) {
-      if (func_op->getLoc() != trivial_loc &&
-          func_op->getLoc() != trivial_loc2) {
+      if (!isTrivialLocation(func_op->getLoc())) {
         return mlir::WalkResult::advance();
       }
       std::optional<mlir::Location> replacement_loc;
@@ -269,9 +278,7 @@ class ResolveTrivialLocationsPass
         return mlir::WalkResult::advance();
       }
       func_op.walk([&](mlir::Operation* op) {
-        // We use the same replacement for all ops with the trivial location,
-        // because that what the lowering of pallas_call would have done.
-        if (op->getLoc() == trivial_loc || op->getLoc() == trivial_loc2) {
+        if (isTrivialLocation(op->getLoc())) {
           op->setLoc(*replacement_loc);
         }
       });

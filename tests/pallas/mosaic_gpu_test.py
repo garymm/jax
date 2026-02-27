@@ -35,6 +35,7 @@ from jax import sharding
 from jax._src import core as jax_core
 from jax._src import dtypes
 from jax._src import test_util as jtu
+from jax._src.lib import version as jaxlib_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith as arith_dialect
 from jax._src.lib.mlir.dialects import gpu as gpu_dialect
@@ -2808,14 +2809,18 @@ class PallasCallTest(PallasTest, jtu.CudaArchSpecificTest):
     )
     jax_core.check_jaxpr(jax.make_jaxpr(f)().jaxpr)
 
+  @parameterized.parameters("pallas_call", "kernel")
   @jtu.thread_unsafe_test()  # Modifies ``os.environ``.
   @jtu.skip_under_pytest("Test fails under pytest in CI")
-  def test_line_info(self):
+  def test_line_info(self, mode):
     self.skip_if_wg_semantics()
+
+    if mode == "kernel" and jaxlib_version < (0, 9, 1):
+      self.skipTest("Needs newer jaxlib")
 
     with jtu.set_env(MOSAIC_GPU_DUMP_PTX="1"), jtu.capture_stdout() as output:
       @functools.partial(
-        self.pallas_call,
+        self.pallas_call if mode == "pallas_call" else self.kernel,
         out_shape=jax.ShapeDtypeStruct([256], jnp.float32),
       )
       def kernel(x_ref, o_ref):
