@@ -19,9 +19,9 @@ load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
     "if_rocm_is_configured",
-    "nanobind_extension",
     "rocm_library",
 )
+load("//jaxlib/rocm:rocm_rpath.bzl", "rocm_nanobind_extension")
 
 licenses(["notice"])
 
@@ -108,7 +108,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_rnn",
     srcs = ["//jaxlib/gpu:rnn.cc"],
     copts = [
@@ -180,7 +180,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_solver",
     srcs = ["//jaxlib/gpu:solver.cc"],
     copts = [
@@ -232,7 +232,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_sparse",
     srcs = ["//jaxlib/gpu:sparse.cc"],
     copts = [
@@ -292,7 +292,7 @@ rocm_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_linalg",
     srcs = ["//jaxlib/gpu:linalg.cc"],
     copts = [
@@ -342,7 +342,7 @@ rocm_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_prng",
     srcs = ["//jaxlib/gpu:prng.cc"],
     copts = [
@@ -383,7 +383,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_hybrid",
     srcs = ["//jaxlib/gpu:hybrid.cc"],
     copts = [
@@ -451,7 +451,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "_triton",
     srcs = ["//jaxlib/gpu:triton.cc"],
     copts = [
@@ -526,7 +526,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+rocm_nanobind_extension(
     name = "rocm_plugin_extension",
     srcs = ["rocm_plugin_extension.cc"],
     module_name = "rocm_plugin_extension",
