@@ -63,6 +63,7 @@ _MOSAIC_ALLOW_HLO = config.bool_state(
 #    return None
 #
 # We should also add a TODO to remove the conditional one month later.
+_FWD_COMPAT_VERSION = 9
 def get_ir_version(ctx: mlir.LoweringRuleContext) -> int | None:
   backend = ctx.module_context.get_backend(optional=True)
   # TODO(apaszke): remove the forward compatibility check after 2025-4-1.
@@ -71,7 +72,7 @@ def get_ir_version(ctx: mlir.LoweringRuleContext) -> int | None:
       or backend is None
       or is_cloud_tpu_older_than(2026, 3, 1, backend)
   ):
-    return 9
+    return _FWD_COMPAT_VERSION
   return None
 
 
@@ -154,6 +155,7 @@ class Tiling(enum.Enum):
 class CustomCallBackendConfig:
   """Represents an unserialized backend config for custom calls."""
   lowered_module_asm: bytes
+  lowered_module_asm_version: int | None
   has_communication: bool
   collective_id: int | None
   device_type: str | None
@@ -186,6 +188,31 @@ class CustomCallBackendConfig:
   # in HLO metadata, and the body blows up its size.
   def __repr__(self):
     return "CustomCallBackendConfig(<omitted>)"
+
+  def downgrade_lowered_module_asm(
+      self, version: int
+  ) -> CustomCallBackendConfig:
+    """Downgrades the lowered module asm to the given version."""
+    assert (
+        self.lowered_module_asm_version is None
+        or self.lowered_module_asm_version > version
+    )
+    with mlir.make_ir_context() as ctx, ir.Location.unknown():
+      module = ir.Module.parse(self.lowered_module_asm)
+      ctx.allow_unregistered_dialects = True
+      pipeline = PassManager.parse(
+          "builtin.module(mosaic-serde{serialize=false},mosaic-serde{serialize=true"
+          f" target-version={version}}})",
+      )
+      pipeline.run(module.operation)
+      bytecode_buffer = io.BytesIO()
+      module.operation.write_bytecode(bytecode_buffer, desired_version=0)
+      new_lowered_module_asm = bytecode_buffer.getvalue()
+    return dataclasses.replace(
+        self,
+        lowered_module_asm=new_lowered_module_asm,
+        lowered_module_asm_version=version,
+    )
 
   def to_json(self) -> bytes:
     """Serializes the backend config into JSON."""
@@ -379,6 +406,10 @@ def _tpu_custom_call_lowering(
   # information.
   if kernel_name is not None:
     extra_attributes = dict(kernel_name=ir.StringAttr.get(kernel_name))
+  # If the IR version we originally generated the ASM string with is not the
+  # same as the one we should have used, we need to downgrade the ASM string.
+  if (ir_version := get_ir_version(ctx)) != config.lowered_module_asm_version:
+    config = config.downgrade_lowered_module_asm(ir_version)
   call = mlir.custom_call(
       "tpu_custom_call",
       result_types=result_types,
@@ -590,6 +621,7 @@ def _lower_to_custom_call_config(
   active_core_count = _get_active_core_count(module)
   return _lowered_to_custom_call_config(
       lowered_module_asm,
+      lowered_module_asm_version=ir_version,
       vmem_limit_bytes=vmem_limit_bytes,
       cost_estimate=cost_estimate,
       flags=flags,
@@ -617,6 +649,7 @@ def _lower_to_custom_call_config(
 def _lowered_to_custom_call_config(
     lowered_module_asm: bytes,
     *,
+    lowered_module_asm_version: int | None,
     vmem_limit_bytes: int | None,
     cost_estimate: CostEstimate | None,
     flags: dict[str, bool | int | float] | None,
@@ -660,6 +693,7 @@ def _lowered_to_custom_call_config(
     )
   return CustomCallBackendConfig(
       lowered_module_asm,
+      lowered_module_asm_version,
       has_communication,
       collective_id,
       device_type,
@@ -834,6 +868,7 @@ def lowered_as_tpu_kernel(
     )
   config = _lowered_to_custom_call_config(
       lowered_module_asm,
+      lowered_module_asm_version=None,
       vmem_limit_bytes=vmem_limit_bytes,
       cost_estimate=cost_estimate,
       flags=flags,
