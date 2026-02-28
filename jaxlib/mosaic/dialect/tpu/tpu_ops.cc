@@ -1254,10 +1254,7 @@ LogicalResult MaskCastOp::verify() {
 }
 
 LogicalResult ScanOp::verify() {
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
-  if (failed(issuing_core)) {
-    return issuing_core;
-  }
+  CoreType issuing_core = GetCoreTypeOfParentOp(**this);
   if (issuing_core != CoreType::kScVectorSubcore) {
     return emitOpError("Scan is supported only on the SC vector subcore");
   }
@@ -1366,8 +1363,7 @@ LogicalResult SemaphoreSignalOp::verify() {
     return emitOpError("Semaphore reference must be rank 0");
   }
 
-  FAILUREOR_ASSIGN_OR_RETURN(CoreType issuing_core_type,
-                             GetCoreTypeOfParentOp(**this));
+  CoreType issuing_core_type = GetCoreTypeOfParentOp(**this);
   CoreType target_core_type = getCoreType().value_or(issuing_core_type);
 
   if (getCoreId() == nullptr && getDeviceId() == nullptr) {
@@ -1453,21 +1449,18 @@ LogicalResult EnqueueDMAOp::verify() {
     return emitOpError(
         "Not implemented: non-zero priority is not supported for remote DMA");
   }
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
-  if (failed(issuing_core)) {
-    return issuing_core;
-  }
+  CoreType issuing_core = GetCoreTypeOfParentOp(**this);
   // If the target core_type is different from the issuing core_type,
   // the specific core_id must be provided. The device_id is irrelevant here.
-  CoreType target_core = getCoreType().value_or(*issuing_core);
-  if (target_core != *issuing_core && getCoreId() == nullptr) {
+  CoreType target_core = getCoreType().value_or(issuing_core);
+  if (target_core != issuing_core && getCoreId() == nullptr) {
     return emitOpError(
         absl::StrFormat("Core id must be specified when target core type (%v) "
                         "is different from source core type (%v)",
-                        target_core, *issuing_core));
+                        target_core, issuing_core));
   }
-  if (getStrictOrdering() && *issuing_core != CoreType::kScScalarSubcore &&
-      *issuing_core != CoreType::kScVectorSubcore) {
+  if (getStrictOrdering() && issuing_core != CoreType::kScScalarSubcore &&
+      issuing_core != CoreType::kScVectorSubcore) {
     return emitOpError(
         "Strict ordering is only supported on the SC scalar and vector "
         "subcores");
@@ -1612,10 +1605,7 @@ FailureOr<bool> EnqueueIndirectDMAOp::isGather() {
 }
 
 LogicalResult EnqueueIndirectDMAOp::verify() {
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
-  if (failed(issuing_core)) {
-    return issuing_core;
-  }
+  CoreType issuing_core = GetCoreTypeOfParentOp(**this);
   if (issuing_core != CoreType::kScVectorSubcore) {
     return emitOpError(
         "Enqueue indirect DMA is supported only on the SC vector subcore");
@@ -1691,11 +1681,8 @@ FailureOr<bool> WaitIndirectDMAOp::isGather() {
 }
 
 LogicalResult WaitIndirectDMAOp::verify() {
-  FailureOr<CoreType> issuing_core = GetCoreTypeOfParentOp(**this);
-  if (failed(issuing_core)) {
-    return issuing_core;
-  }
-  if (*issuing_core != CoreType::kScVectorSubcore) {
+  CoreType issuing_core = GetCoreTypeOfParentOp(**this);
+  if (issuing_core != CoreType::kScVectorSubcore) {
     return emitOpError(
         "Wait indirect DMA is supported only on the SC vector subcore");
   }
@@ -1861,12 +1848,9 @@ LogicalResult ConcatenateOp::verify() {
 }
 
 LogicalResult LogOp::verify() {
-  FailureOr<CoreType> logging_core = GetCoreTypeOfParentOp(**this);
-  if (failed(logging_core)) {
-    return logging_core;
-  }
-  bool is_sc_core = *logging_core == CoreType::kScScalarSubcore ||
-                    *logging_core == CoreType::kScVectorSubcore;
+  CoreType logging_core = GetCoreTypeOfParentOp(**this);
+  bool is_sc_core = logging_core == CoreType::kScScalarSubcore ||
+                    logging_core == CoreType::kScVectorSubcore;
   if (is_sc_core && getFormattedAttr() != nullptr &&
       getFormattedAttr().getValue()) {
     return emitOpError("Formatted logging is not supported on SC");
@@ -1874,7 +1858,7 @@ LogicalResult LogOp::verify() {
   if (is_sc_core && getInputs().size() > 1) {
     return emitOpError("SC logging only supports 0 or 1 inputs");
   }
-  if (*logging_core == CoreType::kScScalarSubcore) {
+  if (logging_core == CoreType::kScScalarSubcore) {
     for (mlir::Value input : getInputs()) {
       if (llvm::isa<VectorType>(input.getType())) {
         return emitOpError(

@@ -82,7 +82,7 @@ std::unique_ptr<OperationPass<func::FuncOp>> createInferMemRefLayoutPass(
 // Determine the core type of the given op based on the `tpu.core_type`
 // annotation of its first parent op that has the annotation. If no such
 // annotation is found, returns kTc.
-FailureOr<CoreType> GetCoreTypeOfParentOp(Operation &op);
+CoreType GetCoreTypeOfParentOp(Operation& op);
 
 // Returns the function in the module with the given core type.
 absl::StatusOr<func::FuncOp> GetFuncWithCoreType(ModuleOp module,

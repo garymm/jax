@@ -242,7 +242,7 @@ void TPUDialect::getCanonicalizationPatterns(RewritePatternSet& results) const
       getContext());
 }
 
-FailureOr<CoreType> GetCoreTypeOfParentOp(Operation& op) {
+CoreType GetCoreTypeOfParentOp(Operation& op) {
   Operation* parent = &op;
   while ((parent = parent->getParentOp())) {
     if (auto core_type = TPUDialect::GetCoreTypeAttr(parent);
