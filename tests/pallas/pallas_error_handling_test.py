@@ -131,12 +131,23 @@ class PallasErrorHandlingTest(jtu.JaxTestCase):
     self.assertEndsWith(tb_string, "output_ref[idx, 0] = input_ref[0, 0]\n")
 
   @parameterized.parameters(
-      ((2048,), (256,)),
-      ((2048,), (512,)),
+      ((128,), (64,), jnp.float32),
+      ((256,), (128,), jnp.bfloat16),
+      ((512,), (256,), jnp.int8),
+      # block size is not a power of 2
+      ((3072,), (384,), jnp.float32),
+      ((2304,), (1152,), jnp.float32),
+      ((3072,), (768,), jnp.bfloat16),
+      ((2560,), (1280,), jnp.bfloat16),
+      ((3072,), (1536,), jnp.int8),
   )
-  def test_small_1d_block_spec_raises(self, total_shape, block_shape):
-    # https://github.com/jax-ml/jax/issues/25379
-    dtype = jnp.float32
+  def test_infeasible_1d_block_spec_raises(
+      self, total_shape, block_shape, dtype
+  ):
+    if (
+        block_shape[0] & (block_shape[0] - 1)
+    ) != 0 and not jtu.is_cloud_tpu_at_least(2026, 3, 5):
+      self.skipTest("requires a newer libTPU")
 
     def kernel(x_ref, y_ref):
       y_ref[...] = x_ref[...] * 2
@@ -151,12 +162,9 @@ class PallasErrorHandlingTest(jtu.JaxTestCase):
         grid=tuple(tot // blk for tot, blk in zip(total_shape, block_shape,
                                                   strict=True)),
     )
-    # Having a block size that is too small should raise a suggestion
-    # to increase the block size.
     with self.assertRaisesRegex(
-        jax.errors.JaxRuntimeError,
-        r"Try changing your kernel block shape to \([0-9,\s]+\) to align with"
-        " the XLA layout",
+        ValueError,
+        "The Pallas TPU lowering currently requires that rank 1 block shapes",
     ):
       fn(x)
 

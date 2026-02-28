@@ -68,6 +68,7 @@ from jax._src.pallas.mosaic import core as tpu_core
 from jax._src.pallas.mosaic import error_handling
 from jax._src.pallas.mosaic import primitives as tpu_primitives
 from jax._src.pallas.mosaic import random as pl_random
+from jax._src.pallas.mosaic import tpu_info
 from jax._src.state import indexing
 from jax._src.state import primitives as state_primitives
 from jax._src.state.types import BitcastTransform, ReshapeTransform
@@ -744,17 +745,25 @@ def _check_block_mappings(
       else:
         bitwidth = dtypes.itemsize_bits(physical_dtype)
       packing = 32 // bitwidth
-      tiling_size = 128 * packing
-      evenly_divisible = (bs0 == as0 or bs0 % tiling_size == 0)
-      if not evenly_divisible:
+      sublane_count = tpu_info.get_tpu_info().num_sublanes
+      lane_count = tpu_info.get_tpu_info().num_lanes
+      min_tiling = lane_count * packing
+      chunk_size = sublane_count * lane_count
+      feasible_block_size = (
+          bs0 == as0
+          or bs0 % chunk_size == 0
+          or (bs0 >= min_tiling and (bs0 & (bs0 - 1)) == 0)  # power of 2
+      )
+      if not feasible_block_size:
         raise ValueError(
             "The Pallas TPU lowering currently requires that rank 1 block"
             " shapes, either 1) the first (and only) dimension of the block"
             " shape is equal to the first (and only) dimension of the array"
             " shape, or 2) the first (and only) dimension of the block shape"
-            f" is a multiple of the tiling size ({tiling_size} = 128 * (32 //"
-            f" {dtypes.itemsize_bits(physical_dtype)})) of the"
-            " array shape. "
+            f" is a multiple of {chunk_size}, or 3) the first (and only)"
+            " dimension of the block shape is a power of 2 and at least the"
+            f" tiling size ({min_tiling} = 128 * (32 //"
+            f" {dtypes.itemsize_bits(physical_dtype)})) of the array shape. "
             + err_details()
         )
 

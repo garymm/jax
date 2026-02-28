@@ -8,8 +8,8 @@
 ## `grid`, a.k.a. kernels in a loop
 
 When using {func}`jax.experimental.pallas.pallas_call` the kernel function
-is executed multiple times on different inputs, as specified via the `grid` argument
-to `pallas_call`. Conceptually:
+is executed multiple times on different inputs, as specified via the `grid`
+argument to `pallas_call`. Conceptually:
 ```python
 pl.pallas_call(some_kernel, grid=(n,))(...)
 ```
@@ -62,7 +62,8 @@ to revisit {ref}`pallas_block_specs_by_example` in Pallas Quickstart.
 `BlockSpec`s are provided to `pallas_call` via the
 `in_specs` and `out_specs`, one for each input and output respectively.
 
-First, we discuss the semantics of `BlockSpec` when `indexing_mode == pl.Blocked()`.
+First, we discuss the semantics of `BlockSpec` when
+`indexing_mode == pl.Blocked()`.
 
 Informally, the `index_map` of the `BlockSpec` takes as arguments
 the invocation indices (as many as the length of the `grid` tuple),
@@ -77,8 +78,8 @@ Not all block shapes are supported.
     Furthermore, the last two dimensions of your block shape must be equal to
     the respective dimension of the overall array, or be divisible
     by 8 and 128 respectively. For blocks of rank 1, the block dimension
-    must be equal to the array dimension, or be divisible by
-    `128 * (32 / bitwidth(dtype))`.
+    must be equal to the array dimension, or be a multiple of 1024, or be a
+    power of 2 and at least `128 * (32 / bitwidth(dtype))`.
 
   * On GPU, when using the Mosaic GPU backend, the size of the blocks is
     unrestricted. However, due to hardware limitations, the size of the minormost
@@ -295,7 +296,6 @@ values for the blocked indexing mode when the block shape does not divide the
 overall array shape.
 
 The `Element` mode is currently supported only on TPUs.
-
 
 ```python
 >>> # element without padding

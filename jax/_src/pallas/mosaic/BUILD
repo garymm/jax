@@ -94,6 +94,7 @@ pytype_strict_library(
         ":error_handling",
         ":primitives",
         ":random",
+        ":tpu_info",
         "//jax",
         "//jax/_src:ad_util",
         "//jax/_src:api",
