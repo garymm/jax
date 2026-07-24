@@ -9865,13 +9865,22 @@ def _optimization_barrier_batcher(batched_args, batch_dims, **params):
 batching.primitive_batchers[optimization_barrier_p] = _optimization_barrier_batcher
 
 def _opt_barrier_jvp(primals, tangents):
-  tangents = [ad.instantiate_zeros(t) for t in tangents]
-  return optimization_barrier(primals), optimization_barrier(tangents)
+  primals_out = optimization_barrier(primals)
+  nzs = [not isinstance(t, ad.Zero) for t in tangents]
+  nz_ts = [t for t, nz in zip(tangents, nzs) if nz]
+  if not nz_ts:
+    return primals_out, tangents
+  out = iter(optimization_barrier(nz_ts))
+  tangents_out = [next(out) if nz else t for t, nz in zip(tangents, nzs)]
+  return primals_out, tangents_out
 ad.primitive_jvps[optimization_barrier_p] = _opt_barrier_jvp
 
 def _opt_barrier_transpose(cts, *primals):
-  cts = [ad.instantiate_zeros(ct) for ct in cts]
-  return optimization_barrier(cts)
+  nzs = [not isinstance(ct, ad.Zero) for ct in cts]
+  nz_cts = [ct for ct, nz in zip(cts, nzs) if nz]
+  if not nz_cts: return cts
+  out = iter(optimization_barrier(nz_cts))
+  return [next(out) if nz else ct for ct, nz in zip(cts, nzs)]
 ad.primitive_transposes[optimization_barrier_p] = _opt_barrier_transpose
 
 
